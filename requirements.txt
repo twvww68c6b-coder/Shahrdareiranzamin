@@ -1,3 +1,4 @@
-aiogram
-SQLAlchemy
-aiosqlite
+aiogram==3.22.0
+SQLAlchemy==2.0.43
+aiosqlite==0.21.0
+asyncpg==0.30.0
