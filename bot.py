@@ -4,32 +4,15 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
+from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
-from aiogram.types import (
-    Message,
-    CallbackQuery,
-    KeyboardButton,
-    ReplyKeyboardMarkup,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-)
+from aiogram.fsm.storage.memory import MemoryStorage
+
 from sqlalchemy import (
-    String,
-    Integer,
-    Float,
-    DateTime,
-    Text,
-    select,
-    func,
-    inspect,
-    text as sql_text,
+    String, Integer, Float, DateTime, Text, select, func, inspect
 )
-from sqlalchemy.ext.asyncio import (
-    create_async_engine,
-    async_sessionmaker,
-    AsyncSession,
-)
+from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -38,41 +21,73 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 # =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-DATABASE_URL = os.getenv("DATABASE_URL")
 
 if not BOT_TOKEN:
-    raise RuntimeError("BOT_TOKEN is missing")
+    raise RuntimeError("BOT_TOKEN is not set")
 
-if DATABASE_URL:
-    if DATABASE_URL.startswith("postgres://"):
-        DATABASE_URL = DATABASE_URL.replace(
-            "postgres://",
-            "postgresql+asyncpg://",
-            1,
-        )
-    elif DATABASE_URL.startswith("postgresql://"):
-        DATABASE_URL = DATABASE_URL.replace(
-            "postgresql://",
-            "postgresql+asyncpg://",
-            1,
-        )
-else:
-    DATABASE_URL = "sqlite+aiosqlite:///crm.db"
+DATABASE_URL = os.getenv("DATABASE_URL", "sqlite+aiosqlite:///crm.db")
+
+# ---------------------------------------------------------
+# ACCESS CONTROL
+# ---------------------------------------------------------
+# Railway Variables:
+#
+# ADMIN_TELEGRAM_ID = telegram id of Hooman
+#
+# ALLOWED_TELEGRAM_IDS =
+# 123456789,987654321,555555555
+#
+# Admin is automatically allowed.
+# ---------------------------------------------------------
+
+ADMIN_TELEGRAM_ID = os.getenv("ADMIN_TELEGRAM_ID", "").strip()
+
+ALLOWED_TELEGRAM_IDS = {
+    x.strip()
+    for x in os.getenv("ALLOWED_TELEGRAM_IDS", "").split(",")
+    if x.strip()
+}
+
+
+# =========================================================
+# DATABASE URL
+# =========================================================
+
+if DATABASE_URL.startswith("postgres://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgres://",
+        "postgresql+asyncpg://",
+        1
+    )
+
+elif DATABASE_URL.startswith("postgresql://"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "postgresql://",
+        "postgresql+asyncpg://",
+        1
+    )
+
+elif DATABASE_URL.startswith("sqlite:///"):
+    DATABASE_URL = DATABASE_URL.replace(
+        "sqlite:///",
+        "sqlite+aiosqlite:///",
+        1
+    )
 
 
 engine = create_async_engine(
     DATABASE_URL,
-    pool_pre_ping=True,
+    echo=False
 )
 
 SessionLocal = async_sessionmaker(
     engine,
-    expire_on_commit=False,
+    expire_on_commit=False
 )
 
 
 # =========================================================
-# DATABASE
+# DATABASE MODELS
 # =========================================================
 
 class Base(DeclarativeBase):
@@ -82,29 +97,27 @@ class Base(DeclarativeBase):
 class User(Base):
     __tablename__ = "users"
 
-    id: Mapped[int] = mapped_column(
-        Integer,
-        primary_key=True,
-    )
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
 
     telegram_id: Mapped[int] = mapped_column(
         Integer,
         unique=True,
-        index=True,
+        index=True
     )
 
     name: Mapped[str] = mapped_column(
-        String(200)
+        String(100),
+        default=""
     )
 
     role: Mapped[str] = mapped_column(
         String(50),
-        default="agent",
+        default="مشاور"
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=datetime.utcnow
     )
 
 
@@ -113,132 +126,143 @@ class Property(Base):
 
     id: Mapped[int] = mapped_column(
         Integer,
-        primary_key=True,
+        primary_key=True
     )
 
     code: Mapped[str] = mapped_column(
         String(100),
         unique=True,
-        index=True,
+        index=True
     )
 
     area: Mapped[str] = mapped_column(
-        String(200)
+        String(100),
+        default=""
+    )
+
+    address: Mapped[str] = mapped_column(
+        Text,
+        default=""
     )
 
     sqm: Mapped[float] = mapped_column(
-        Float
+        Float,
+        default=0
     )
 
     price: Mapped[float] = mapped_column(
-        Float
+        Float,
+        default=0
     )
 
     property_type: Mapped[str] = mapped_column(
-        String(100)
+        String(100),
+        default=""
     )
 
     bedrooms: Mapped[int] = mapped_column(
         Integer,
-        default=0,
+        default=0
     )
 
     floors: Mapped[int] = mapped_column(
         Integer,
-        default=0,
+        default=0
     )
 
     unit_floor: Mapped[int] = mapped_column(
         Integer,
-        default=0,
+        default=0
     )
 
     units_per_floor: Mapped[int] = mapped_column(
         Integer,
-        default=1,
+        default=1
     )
 
     elevator: Mapped[str] = mapped_column(
-        String(20),
-        default="ندارد",
+        String(50),
+        default=""
     )
 
     parking: Mapped[str] = mapped_column(
-        String(20),
-        default="ندارد",
+        String(50),
+        default=""
     )
 
     parking_type: Mapped[str] = mapped_column(
-        String(50),
-        default="",
+        String(100),
+        default=""
     )
 
     storage: Mapped[str] = mapped_column(
-        String(20),
-        default="ندارد",
+        String(50),
+        default=""
     )
 
     tenant: Mapped[str] = mapped_column(
-        String(20),
-        default="ندارد",
+        String(50),
+        default=""
     )
 
     deposit: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     rent: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     vacancy_date: Mapped[str] = mapped_column(
         String(100),
-        default="",
+        default=""
     )
 
     document_type: Mapped[str] = mapped_column(
         String(100),
-        default="",
+        default=""
     )
 
     owner_name: Mapped[str] = mapped_column(
-        String(200)
+        String(150),
+        default=""
     )
 
     owner_phone: Mapped[str] = mapped_column(
-        String(50)
+        String(50),
+        default=""
     )
 
     description: Mapped[str] = mapped_column(
         Text,
-        default="",
+        default=""
     )
 
     status: Mapped[str] = mapped_column(
-        String(50),
-        default="فعال",
+        String(100),
+        default="فعال"
     )
 
     transaction_value: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     created_by: Mapped[int] = mapped_column(
         Integer,
-        default=0,
+        default=0
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=datetime.utcnow
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=datetime.utcnow
     )
 
 
@@ -247,65 +271,73 @@ class Client(Base):
 
     id: Mapped[int] = mapped_column(
         Integer,
-        primary_key=True,
+        primary_key=True
     )
 
     name: Mapped[str] = mapped_column(
-        String(200)
+        String(150)
     )
 
     phone: Mapped[str] = mapped_column(
-        String(50)
+        String(50),
+        default=""
     )
 
     area: Mapped[str] = mapped_column(
-        String(200),
-        default="",
+        String(100),
+        default=""
     )
 
     min_sqm: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     max_sqm: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     min_budget: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     max_budget: Mapped[float] = mapped_column(
         Float,
-        default=0,
+        default=0
     )
 
     property_type: Mapped[str] = mapped_column(
         String(100),
-        default="",
+        default=""
     )
 
+    # Kept for old database compatibility.
+    # New customer registration does NOT ask for bedrooms.
     bedrooms: Mapped[int] = mapped_column(
         Integer,
-        default=0,
+        default=0
     )
 
     description: Mapped[str] = mapped_column(
         Text,
-        default="",
+        default=""
+    )
+
+    status: Mapped[str] = mapped_column(
+        String(50),
+        default="فعال"
     )
 
     created_by: Mapped[int] = mapped_column(
         Integer,
-        default=0,
+        default=0
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=datetime.utcnow
     )
 
 
@@ -314,67 +346,64 @@ class Visit(Base):
 
     id: Mapped[int] = mapped_column(
         Integer,
-        primary_key=True,
+        primary_key=True
     )
 
     property_id: Mapped[int] = mapped_column(
-        Integer,
-        index=True,
+        Integer
     )
 
     client_id: Mapped[int] = mapped_column(
-        Integer,
-        index=True,
+        Integer
     )
 
     agent_id: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
+        Integer
     )
 
     visited_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=datetime.utcnow
     )
 
     interest: Mapped[str] = mapped_column(
-        String(50),
-        default="",
+        String(100),
+        default=""
     )
 
     price_reaction: Mapped[str] = mapped_column(
-        String(50),
-        default="",
+        String(100),
+        default=""
     )
 
     property_reaction: Mapped[str] = mapped_column(
-        String(50),
-        default="",
+        String(100),
+        default=""
     )
 
     objection: Mapped[str] = mapped_column(
         Text,
-        default="",
+        default=""
     )
 
     next_action: Mapped[str] = mapped_column(
         String(100),
-        default="",
+        default=""
     )
 
     followup_date: Mapped[str] = mapped_column(
         String(100),
-        default="",
+        default=""
     )
 
     note: Mapped[str] = mapped_column(
         Text,
-        default="",
+        default=""
     )
 
     outcome: Mapped[str] = mapped_column(
-        Text,
-        default="",
+        String(100),
+        default=""
     )
 
 
@@ -383,48 +412,118 @@ class Activity(Base):
 
     id: Mapped[int] = mapped_column(
         Integer,
-        primary_key=True,
+        primary_key=True
     )
 
     user_id: Mapped[int] = mapped_column(
-        Integer,
-        default=0,
+        Integer
     )
 
     property_id: Mapped[int] = mapped_column(
         Integer,
-        nullable=True,
-        index=True,
+        default=0
     )
 
     client_id: Mapped[int] = mapped_column(
         Integer,
-        nullable=True,
-        index=True,
+        default=0
     )
 
     activity_type: Mapped[str] = mapped_column(
-        String(100)
+        String(150)
     )
 
     note: Mapped[str] = mapped_column(
         Text,
-        default="",
+        default=""
     )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow,
+        default=datetime.utcnow
     )
 
 
 # =========================================================
-# FSM STATES
+# CONSTANTS
+# =========================================================
+
+AREAS = [
+    "خانی‌آباد نو جنوبی",
+    "خانی‌آباد نو شمالی",
+    "شهرک شریعتی",
+    "شهرک بستان شمالی",
+    "شهرک بستان جنوبی",
+]
+
+PROPERTY_TYPES = [
+    "آپارتمان",
+    "مجتمع",
+    "کلنگی",
+    "مستغلات",
+    "ویلایی",
+    "تجاری",
+    "زمین",
+    "اداری",
+    "سایر",
+]
+
+STATUSES = [
+    "🟢 فعال",
+    "🟡 در مذاکره",
+    "🔵 معامله شد - توسط ما",
+    "🟣 معامله شد - توسط دیگری",
+    "🔴 منصرف شد",
+    "⚫ غیرفعال",
+]
+
+CLIENT_STATUSES = [
+    "فعال",
+    "خرید کرده",
+    "منصرف شده",
+]
+
+INTERESTS = [
+    "خیلی زیاد",
+    "زیاد",
+    "متوسط",
+    "کم",
+    "رد",
+]
+
+PRICE_REACTIONS = [
+    "مناسب",
+    "کمی بالا",
+    "بالا",
+    "خیلی بالا",
+    "نظر نداد",
+]
+
+PROPERTY_REACTIONS = [
+    "پسندید",
+    "متوسط",
+    "نپسندید",
+    "نامشخص",
+]
+
+NEXT_ACTIONS = [
+    "پیگیری",
+    "بازدید مجدد",
+    "مذاکره",
+    "قرارداد",
+    "رد شد",
+    "فعلاً صبر",
+]
+
+
+# =========================================================
+# FSM
 # =========================================================
 
 class PropertyForm(StatesGroup):
     code = State()
     area = State()
+    address = State()
     sqm = State()
     price = State()
     property_type = State()
@@ -456,7 +555,6 @@ class ClientForm(StatesGroup):
     min_budget = State()
     max_budget = State()
     property_type = State()
-    bedrooms = State()
     description = State()
 
 
@@ -490,110 +588,158 @@ class StatusForm(StatesGroup):
     transaction_value = State()
 
 
-# =========================================================
-# KEYBOARDS
-# =========================================================
-
-def kb(rows):
-    return ReplyKeyboardMarkup(
-        keyboard=[
-            [KeyboardButton(text=x) for x in row]
-            for row in rows
-        ],
-        resize_keyboard=True,
-    )
-
-
-def inline(rows):
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text=text_,
-                    callback_data=data_,
-                )
-                for text_, data_ in row
-            ]
-            for row in rows
-        ]
-    )
-
-
-MAIN = kb([
-    ["🏠 فایل‌ها", "👤 مشتری‌ها"],
-    ["➕ ثبت فایل", "➕ ثبت مشتری"],
-    ["👀 ثبت بازدید", "📞 پیگیری"],
-    ["🔎 پیشنهاد فایل", "📝 آخرین فعالیت‌ها"],
-    ["📊 KPI من", "👥 KPI تیم"],
-])
-
-CANCEL = kb([
-    ["❌ لغو"]
-])
-
-
-def bedrooms_keyboard():
-    return kb([
-        ["۰", "۱", "۲", "۳"],
-        ["۴", "۵", "+۵"],
-        ["❌ لغو"],
-    ])
-
-
-def units_keyboard():
-    return kb([
-        ["۱", "۲", "۳", "۴"],
-        ["+۴"],
-        ["❌ لغو"],
-    ])
-
-
-def floor_keyboard():
-    return kb([
-        ["همکف", "۱", "۲", "۳", "۴", "۵"],
-        ["۶", "۷", "۸", "۹", "۱۰"],
-        ["۱۱", "۱۲", "۱۳", "۱۴", "۱۵"],
-        ["۱۶", "۱۷", "۱۸", "۱۹", "۲۰"],
-        ["+۲۰", "❌ لغو"],
-    ])
+class ClientStatusForm(StatesGroup):
+    client_id = State()
+    status = State()
 
 
 # =========================================================
-# STATUS
+# BOT
 # =========================================================
 
-STATUS_NAMES = {
-    "فعال": "🟢 فعال",
-    "در مذاکره": "🟡 در مذاکره",
-    "معامله شد - توسط ما": "🔵 معامله شد - توسط ما",
-    "معامله شد - توسط دیگری": "🟣 معامله شد - توسط دیگری",
-    "منصرف شد": "🔴 منصرف شد",
-    "غیرفعال": "⚫ غیرفعال",
-}
+bot = Bot(BOT_TOKEN)
+dp = Dispatcher(storage=MemoryStorage())
 
 
 # =========================================================
 # HELPERS
 # =========================================================
 
-def now():
-    return datetime.utcnow()
+def normalize_digits(value):
+    if value is None:
+        return ""
+
+    value = str(value)
+
+    translation = str.maketrans(
+        "۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩",
+        "01234567890123456789"
+    )
+
+    return value.translate(translation)
+
+
+def number(value, default=0):
+    try:
+        value = normalize_digits(value)
+        value = value.replace(",", "").replace("٬", "")
+        return float(value)
+    except Exception:
+        return default
 
 
 def money(value):
-    if not value:
-        return "—"
+    if value is None:
+        return "0"
 
-    return f"{value:,.0f}"
+    try:
+        value = float(value)
+
+        if value.is_integer():
+            return f"{int(value):,}"
+
+        return f"{value:,.2f}"
+
+    except Exception:
+        return str(value)
+
+
+def is_admin(user_id: int) -> bool:
+    return (
+        ADMIN_TELEGRAM_ID != ""
+        and str(user_id) == ADMIN_TELEGRAM_ID
+    )
+
+
+def is_allowed(user_id: int) -> bool:
+    if is_admin(user_id):
+        return True
+
+    return str(user_id) in ALLOWED_TELEGRAM_IDS
+
+
+async def access_required(message: Message) -> bool:
+    if is_allowed(message.from_user.id):
+        return True
+
+    await message.answer(
+        "⛔ دسترسی شما به این ربات تأیید نشده است.\n\n"
+        "در صورت نیاز، با مدیر سیستم تماس بگیرید."
+    )
+
+    return False
+
+
+async def callback_access_required(callback: CallbackQuery) -> bool:
+    if is_allowed(callback.from_user.id):
+        return True
+
+    await callback.answer(
+        "⛔ دسترسی ندارید.",
+        show_alert=True
+    )
+
+    return False
+
+
+def keyboard(
+    rows,
+    include_cancel=True
+):
+    result = []
+
+    for row in rows:
+        result.append([
+            KeyboardButton(text=str(x))
+            for x in row
+        ])
+
+    if include_cancel:
+        result.append([
+            KeyboardButton(text="❌ لغو")
+        ])
+
+    return ReplyKeyboardMarkup(
+        keyboard=result,
+        resize_keyboard=True
+    )
+
+
+def one_column(items, include_cancel=True):
+    return keyboard(
+        [[x] for x in items],
+        include_cancel=include_cancel
+    )
+
+
+def main_menu(user_id: int):
+    rows = [
+        ["🏠 فایل‌ها", "👤 مشتری‌ها"],
+        ["➕ ثبت فایل", "➕ ثبت مشتری"],
+        ["👀 ثبت بازدید", "📞 پیگیری"],
+        ["🔎 پیشنهاد فایل", "📊 KPI من"],
+    ]
+
+    if is_admin(user_id):
+        rows.append([
+            "📝 آخرین فعالیت‌ها",
+            "👥 KPI تیم"
+        ])
+
+    return keyboard(
+        rows,
+        include_cancel=False
+    )
 
 
 async def get_user(
     session: AsyncSession,
-    telegram_user,
+    telegram_id: int,
+    name: str = ""
 ):
     result = await session.execute(
         select(User).where(
-            User.telegram_id == telegram_user.id
+            User.telegram_id == telegram_id
         )
     )
 
@@ -601,8 +747,9 @@ async def get_user(
 
     if not user:
         user = User(
-            telegram_id=telegram_user.id,
-            name=telegram_user.full_name or "کاربر",
+            telegram_id=telegram_id,
+            name=name,
+            role="مدیر" if is_admin(telegram_id) else "مشاور"
         )
 
         session.add(user)
@@ -616,52 +763,19 @@ async def add_activity(
     user_id,
     activity_type,
     note="",
-    property_id=None,
-    client_id=None,
+    property_id=0,
+    client_id=0
 ):
-    session.add(
-        Activity(
-            user_id=user_id,
-            activity_type=activity_type,
-            note=note,
-            property_id=property_id,
-            client_id=client_id,
-        )
+    activity = Activity(
+        user_id=user_id,
+        property_id=property_id,
+        client_id=client_id,
+        activity_type=activity_type,
+        note=note
     )
 
-
-async def owner_count(
-    session,
-    owner_name,
-    owner_phone,
-):
-    query = select(
-        func.count(Property.id)
-    ).where(
-        Property.owner_name == owner_name,
-        Property.owner_phone == owner_phone,
-    )
-
-    result = await session.execute(query)
-
-    return int(result.scalar() or 0)
-
-
-async def owner_files(
-    session,
-    owner_name,
-    owner_phone,
-):
-    query = select(Property).where(
-        Property.owner_name == owner_name,
-        Property.owner_phone == owner_phone,
-    ).order_by(
-        Property.created_at.desc()
-    )
-
-    result = await session.execute(query)
-
-    return list(result.scalars().all())
+    session.add(activity)
+    await session.commit()
 
 
 # =========================================================
@@ -670,115 +784,163 @@ async def owner_files(
 
 async def migrate():
     async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
 
-        await conn.run_sync(
-            Base.metadata.create_all
+        def get_columns(sync_conn, table_name):
+            inspector = inspect(sync_conn)
+            return {
+                col["name"]
+                for col in inspector.get_columns(table_name)
+            }
+
+        property_columns = await conn.run_sync(
+            lambda sync_conn: get_columns(
+                sync_conn,
+                "properties"
+            )
         )
 
-        def sync_migrate(connection):
+        client_columns = await conn.run_sync(
+            lambda sync_conn: get_columns(
+                sync_conn,
+                "clients"
+            )
+        )
 
-            inspector = inspect(connection)
+        async def add_column_if_missing(
+            sync_conn,
+            table,
+            column_name,
+            sql_type
+        ):
+            columns = get_columns(
+                sync_conn,
+                table
+            )
 
-            tables = inspector.get_table_names()
-
-            if "properties" not in tables:
-                return
-
-            columns = {
-                column["name"]
-                for column in inspector.get_columns(
-                    "properties"
+            if column_name not in columns:
+                sync_conn.exec_driver_sql(
+                    f"ALTER TABLE {table} "
+                    f"ADD COLUMN {column_name} {sql_type}"
                 )
-            }
 
-            additions = {
-                "unit_floor": "INTEGER DEFAULT 0",
-                "status": "VARCHAR(50) DEFAULT 'فعال'",
-                "transaction_value": "DOUBLE PRECISION DEFAULT 0",
-                "updated_at": "TIMESTAMP",
-            }
+        await conn.run_sync(
+            lambda sync_conn: add_column_if_missing(
+                sync_conn,
+                "properties",
+                "address",
+                "TEXT DEFAULT ''"
+            )
+        )
 
-            for column_name, column_type in additions.items():
+        await conn.run_sync(
+            lambda sync_conn: add_column_if_missing(
+                sync_conn,
+                "properties",
+                "unit_floor",
+                "INTEGER DEFAULT 0"
+            )
+        )
 
-                if column_name not in columns:
+        await conn.run_sync(
+            lambda sync_conn: add_column_if_missing(
+                sync_conn,
+                "properties",
+                "status",
+                "VARCHAR(100) DEFAULT 'فعال'"
+            )
+        )
 
-                    connection.execute(
-                        sql_text(
-                            f"""
-                            ALTER TABLE properties
-                            ADD COLUMN {column_name}
-                            {column_type}
-                            """
-                        )
-                    )
+        await conn.run_sync(
+            lambda sync_conn: add_column_if_missing(
+                sync_conn,
+                "properties",
+                "transaction_value",
+                "FLOAT DEFAULT 0"
+            )
+        )
 
-        await conn.run_sync(sync_migrate)
+        await conn.run_sync(
+            lambda sync_conn: add_column_if_missing(
+                sync_conn,
+                "properties",
+                "updated_at",
+                "DATETIME"
+            )
+        )
+
+        await conn.run_sync(
+            lambda sync_conn: add_column_if_missing(
+                sync_conn,
+                "clients",
+                "status",
+                "VARCHAR(50) DEFAULT 'فعال'"
+            )
+        )
 
 
 # =========================================================
-# BOT
-# =========================================================
-
-bot = Bot(
-    token=BOT_TOKEN
-)
-
-dp = Dispatcher()
-
-
-# =========================================================
-# START
+# START / ACCESS
 # =========================================================
 
 @dp.message(CommandStart())
-async def start(message: Message):
+async def start(message: Message, state: FSMContext):
+
+    await state.clear()
+
+    if not await access_required(message):
+        return
 
     async with SessionLocal() as session:
 
-        user = await get_user(
+        await get_user(
             session,
-            message.from_user,
+            message.from_user.id,
+            message.from_user.full_name
         )
 
-        await message.answer(
-            f"""
-🏙️ <b>شهردار ایران‌زمین | Hooman Real Estate</b>
+    await message.answer(
+        "🏙️ **شهردار ایران‌زمین**\n"
+        "Hooman Real Estate\n\n"
+        "سیستم مدیریت فایل، مشتری و تیم",
+        reply_markup=main_menu(
+            message.from_user.id
+        ),
+        parse_mode="Markdown"
+    )
 
-سلام {user.name} 👋
-
-CRM فایل، مالک، مشتری، بازدید و معامله آماده است.
-""",
-            reply_markup=MAIN,
-        )
-
-
-# =========================================================
-# CANCEL
-# =========================================================
 
 @dp.message(F.text == "❌ لغو")
-async def cancel(
+async def cancel_all(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
+
+    if not await access_required(message):
+        return
 
     await state.clear()
 
     await message.answer(
         "❌ عملیات لغو شد.",
-        reply_markup=MAIN,
+        reply_markup=main_menu(
+            message.from_user.id
+        )
     )
 
 
 # =========================================================
-# ADD PROPERTY
+# PROPERTY REGISTRATION
 # =========================================================
 
 @dp.message(F.text == "➕ ثبت فایل")
-async def add_property(
+async def property_start(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
+
+    if not await access_required(message):
+        return
 
     await state.clear()
 
@@ -787,37 +949,35 @@ async def add_property(
     )
 
     await message.answer(
-        "🔢 کد فایل را وارد کن:",
-        reply_markup=CANCEL,
+        "➕ ثبت فایل جدید\n\n"
+        "کد فایل را وارد کن:"
     )
 
 
 @dp.message(PropertyForm.code)
-async def p_code(
+async def property_code(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     code = message.text.strip()
 
     async with SessionLocal() as session:
 
-        exists = (
-            await session.execute(
-                select(Property).where(
-                    Property.code == code
-                )
+        result = await session.execute(
+            select(Property).where(
+                Property.code == code
             )
-        ).scalar_one_or_none()
+        )
 
-        if exists:
+        exists = result.scalar_one_or_none()
 
-            await message.answer(
-                "⚠️ این کد فایل قبلاً ثبت شده.\n"
-                "یک کد دیگر وارد کن."
-            )
-
-            return
+    if exists:
+        await message.answer(
+            "⚠️ این کد فایل قبلاً ثبت شده.\n"
+            "یک کد دیگر وارد کن:"
+        )
+        return
 
     await state.update_data(
         code=code
@@ -828,18 +988,46 @@ async def p_code(
     )
 
     await message.answer(
-        "📍 منطقه / محله:"
+        "📍 منطقه ملک را انتخاب کن:",
+        reply_markup=one_column(
+            AREAS
+        )
     )
 
 
 @dp.message(PropertyForm.area)
-async def p_area(
+async def property_area(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
+):
+
+    if message.text not in AREAS:
+        await message.answer(
+            "لطفاً یکی از مناطق را انتخاب کن."
+        )
+        return
+
+    await state.update_data(
+        area=message.text
+    )
+
+    await state.set_state(
+        PropertyForm.address
+    )
+
+    await message.answer(
+        "🏠 آدرس دقیق ملک را وارد کن:"
+    )
+
+
+@dp.message(PropertyForm.address)
+async def property_address(
+    message: Message,
+    state: FSMContext
 ):
 
     await state.update_data(
-        area=message.text.strip()
+        address=message.text.strip()
     )
 
     await state.set_state(
@@ -852,23 +1040,17 @@ async def p_area(
 
 
 @dp.message(PropertyForm.sqm)
-async def p_sqm(
+async def property_sqm(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
+    value = number(message.text)
 
-        value = float(
-            message.text.replace(",", "")
-        )
-
-    except:
-
+    if value <= 0:
         await message.answer(
-            "⚠️ فقط عدد وارد کن."
+            "متراژ معتبر وارد کن:"
         )
-
         return
 
     await state.update_data(
@@ -885,23 +1067,17 @@ async def p_sqm(
 
 
 @dp.message(PropertyForm.price)
-async def p_price(
+async def property_price(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
+    value = number(message.text)
 
-        value = float(
-            message.text.replace(",", "")
-        )
-
-    except:
-
+    if value < 0:
         await message.answer(
-            "⚠️ فقط عدد وارد کن."
+            "قیمت معتبر وارد کن:"
         )
-
         return
 
     await state.update_data(
@@ -913,18 +1089,27 @@ async def p_price(
     )
 
     await message.answer(
-        "🏷 نوع ملک را وارد کن:"
+        "🏢 نوع ملک را انتخاب کن:",
+        reply_markup=one_column(
+            PROPERTY_TYPES
+        )
     )
 
 
 @dp.message(PropertyForm.property_type)
-async def p_type(
+async def property_type(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
+    if message.text not in PROPERTY_TYPES:
+        await message.answer(
+            "لطفاً نوع ملک را از دکمه‌ها انتخاب کن."
+        )
+        return
+
     await state.update_data(
-        property_type=message.text.strip()
+        property_type=message.text
     )
 
     await state.set_state(
@@ -933,43 +1118,35 @@ async def p_type(
 
     await message.answer(
         "🛏 تعداد خواب:",
-        reply_markup=bedrooms_keyboard(),
+        reply_markup=keyboard([
+            ["۰", "۱", "۲", "۳"],
+            ["۴", "۵", "+۵"]
+        ])
     )
 
 
 @dp.message(PropertyForm.bedrooms)
-async def p_bedrooms(
+async def property_bedrooms(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    value_text = message.text.strip()
-
-    if value_text == "+۵":
-
+    if message.text == "+۵":
         await message.answer(
-            "تعداد خواب را عددی وارد کن:"
+            "تعداد دقیق خواب را وارد کن:"
         )
-
         return
 
-    try:
+    value = number(message.text)
 
-        value = int(value_text)
-
-        if value < 0:
-            raise ValueError
-
-    except:
-
+    if value < 0:
         await message.answer(
-            "یکی از گزینه‌ها را انتخاب کن."
+            "تعداد خواب معتبر وارد کن."
         )
-
         return
 
     await state.update_data(
-        bedrooms=value
+        bedrooms=int(value)
     )
 
     await state.set_state(
@@ -977,32 +1154,35 @@ async def p_bedrooms(
     )
 
     await message.answer(
-        "🏢 تعداد کل طبقات ساختمان را وارد کن:",
-        reply_markup=CANCEL,
+        "🏢 تعداد کل طبقات ساختمان:",
+        reply_markup=keyboard([
+            ["همکف", "۱", "۲", "۳", "۴"],
+            ["۵", "۶", "۷", "۸", "۸+"]
+        ])
     )
 
 
 @dp.message(PropertyForm.floors)
-async def p_floors(
+async def property_floors(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = int(
-            message.text.strip()
-        )
-
-        if value < 0:
-            raise ValueError
-
-    except:
-
+    if message.text == "۸+":
         await message.answer(
-            "⚠️ تعداد طبقات را به صورت عدد وارد کن."
+            "تعداد دقیق طبقات را وارد کن:"
         )
+        return
 
+    if message.text == "همکف":
+        value = 0
+    else:
+        value = int(number(message.text))
+
+    if value < 0:
+        await message.answer(
+            "تعداد طبقات معتبر وارد کن."
+        )
         return
 
     await state.update_data(
@@ -1014,47 +1194,36 @@ async def p_floors(
     )
 
     await message.answer(
-        "🏢 ملک طبقه چندمه؟",
-        reply_markup=floor_keyboard(),
+        "🏠 ملک در چه طبقه‌ای قرار دارد؟",
+        reply_markup=keyboard([
+            ["همکف", "۱", "۲", "۳", "۴"],
+            ["۵", "۶", "۷", "۸", "۸+"]
+        ])
     )
 
 
 @dp.message(PropertyForm.unit_floor)
-async def p_unit_floor(
+async def property_unit_floor(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    value_text = message.text.strip()
-
-    if value_text == "همکف":
-
-        value = 0
-
-    elif value_text == "+۲۰":
-
+    if message.text == "۸+":
         await message.answer(
-            "شماره طبقه را وارد کن:"
+            "طبقه دقیق را وارد کن:"
         )
-
         return
 
+    if message.text == "همکف":
+        value = 0
     else:
+        value = int(number(message.text))
 
-        try:
-
-            value = int(value_text)
-
-            if value < 0:
-                raise ValueError
-
-        except:
-
-            await message.answer(
-                "یکی از گزینه‌های طبقه را انتخاب کن."
-            )
-
-            return
+    if value < 0:
+        await message.answer(
+            "طبقه معتبر وارد کن."
+        )
+        return
 
     await state.update_data(
         unit_floor=value
@@ -1065,40 +1234,31 @@ async def p_unit_floor(
     )
 
     await message.answer(
-        "🏗 چند واحد در هر طبقه؟",
-        reply_markup=units_keyboard(),
+        "🚪 چند واحد در هر طبقه؟",
+        reply_markup=keyboard([
+            ["۱", "۲", "۳", "۴", "+۴"]
+        ])
     )
 
 
 @dp.message(PropertyForm.units_per_floor)
-async def p_units(
+async def property_units(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    value_text = message.text.strip()
-
-    if value_text == "+۴":
-
+    if message.text == "+۴":
         await message.answer(
-            "تعداد واحد در طبقه را عددی وارد کن:"
+            "تعداد دقیق واحد در هر طبقه را وارد کن:"
         )
-
         return
 
-    try:
+    value = int(number(message.text))
 
-        value = int(value_text)
-
-        if value < 1:
-            raise ValueError
-
-    except:
-
+    if value <= 0:
         await message.answer(
-            "یکی از گزینه‌ها را انتخاب کن."
+            "تعداد معتبر وارد کن."
         )
-
         return
 
     await state.update_data(
@@ -1111,28 +1271,19 @@ async def p_units(
 
     await message.answer(
         "🛗 آسانسور؟",
-        reply_markup=kb([
-            ["دارد", "ندارد"],
-            ["❌ لغو"],
-        ]),
+        reply_markup=keyboard([
+            ["دارد", "ندارد"]
+        ])
     )
 
 
 @dp.message(PropertyForm.elevator)
-async def p_elevator(
+async def property_elevator(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    if message.text not in (
-        "دارد",
-        "ندارد",
-    ):
-
-        await message.answer(
-            "دارد یا ندارد؟"
-        )
-
+    if message.text not in ["دارد", "ندارد"]:
         return
 
     await state.update_data(
@@ -1145,28 +1296,19 @@ async def p_elevator(
 
     await message.answer(
         "🚗 پارکینگ؟",
-        reply_markup=kb([
-            ["دارد", "ندارد"],
-            ["❌ لغو"],
-        ]),
+        reply_markup=keyboard([
+            ["دارد", "ندارد"]
+        ])
     )
 
 
 @dp.message(PropertyForm.parking)
-async def p_parking(
+async def property_parking(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    if message.text not in (
-        "دارد",
-        "ندارد",
-    ):
-
-        await message.answer(
-            "دارد یا ندارد؟"
-        )
-
+    if message.text not in ["دارد", "ندارد"]:
         return
 
     await state.update_data(
@@ -1180,11 +1322,11 @@ async def p_parking(
         )
 
         await message.answer(
-            "نوع پارکینگ؟",
-            reply_markup=kb([
-                ["غیرمزاحم", "مزاحم"],
-                ["❌ لغو"],
-            ]),
+            "نوع پارکینگ:",
+            reply_markup=keyboard([
+                ["اختصاصی", "مشاع"],
+                ["مزاحم", "نامشخص"]
+            ])
         )
 
     else:
@@ -1198,30 +1340,18 @@ async def p_parking(
         )
 
         await message.answer(
-            "📦 انباری؟",
-            reply_markup=kb([
-                ["دارد", "ندارد"],
-                ["❌ لغو"],
-            ]),
+            "انباری؟",
+            reply_markup=keyboard([
+                ["دارد", "ندارد"]
+            ])
         )
 
 
 @dp.message(PropertyForm.parking_type)
-async def p_parking_type(
+async def property_parking_type(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
-
-    if message.text not in (
-        "غیرمزاحم",
-        "مزاحم",
-    ):
-
-        await message.answer(
-            "یکی از گزینه‌ها را انتخاب کن."
-        )
-
-        return
 
     await state.update_data(
         parking_type=message.text
@@ -1232,30 +1362,18 @@ async def p_parking_type(
     )
 
     await message.answer(
-        "📦 انباری؟",
-        reply_markup=kb([
-            ["دارد", "ندارد"],
-            ["❌ لغو"],
-        ]),
+        "انباری؟",
+        reply_markup=keyboard([
+            ["دارد", "ندارد"]
+        ])
     )
 
 
 @dp.message(PropertyForm.storage)
-async def p_storage(
+async def property_storage(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
-
-    if message.text not in (
-        "دارد",
-        "ندارد",
-    ):
-
-        await message.answer(
-            "دارد یا ندارد؟"
-        )
-
-        return
 
     await state.update_data(
         storage=message.text
@@ -1266,89 +1384,42 @@ async def p_storage(
     )
 
     await message.answer(
-        "👤 مستأجر دارد؟",
-        reply_markup=kb([
-            ["دارد", "ندارد"],
-            ["❌ لغو"],
-        ]),
+        "وضعیت سکونت:",
+        reply_markup=keyboard([
+            ["خالی", "مالک‌نشین"],
+            ["مستأجر دارد", "نامشخص"]
+        ])
     )
 
 
 @dp.message(PropertyForm.tenant)
-async def p_tenant(
+async def property_tenant(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
-
-    if message.text not in (
-        "دارد",
-        "ندارد",
-    ):
-
-        await message.answer(
-            "دارد یا ندارد؟"
-        )
-
-        return
 
     await state.update_data(
         tenant=message.text
     )
 
-    if message.text == "دارد":
+    await state.set_state(
+        PropertyForm.deposit
+    )
 
-        await state.set_state(
-            PropertyForm.deposit
-        )
-
-        await message.answer(
-            "💵 ودیعه:"
-        )
-
-    else:
-
-        await state.update_data(
-            deposit=0,
-            rent=0,
-            vacancy_date="",
-        )
-
-        await state.set_state(
-            PropertyForm.document_type
-        )
-
-        await message.answer(
-            "📄 نوع سند:",
-            reply_markup=kb([
-                ["تک‌برگ", "اوقافی", "قدیمی"],
-                ["منگوله‌دار", "قولنامه‌ای", "سایر"],
-                ["❌ لغو"],
-            ]),
-        )
+    await message.answer(
+        "💵 مبلغ رهن/ودیعه را وارد کن.\n"
+        "اگر ندارد ۰ بزن:"
+    )
 
 
 @dp.message(PropertyForm.deposit)
-async def p_deposit(
+async def property_deposit(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = float(
-            message.text.replace(",", "")
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ فقط عدد وارد کن."
-        )
-
-        return
-
     await state.update_data(
-        deposit=value
+        deposit=number(message.text)
     )
 
     await state.set_state(
@@ -1356,32 +1427,19 @@ async def p_deposit(
     )
 
     await message.answer(
-        "💵 اجاره ماهانه:"
+        "💵 مبلغ اجاره را وارد کن.\n"
+        "اگر ندارد ۰ بزن:"
     )
 
 
 @dp.message(PropertyForm.rent)
-async def p_rent(
+async def property_rent(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = float(
-            message.text.replace(",", "")
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ فقط عدد وارد کن."
-        )
-
-        return
-
     await state.update_data(
-        rent=value
+        rent=number(message.text)
     )
 
     await state.set_state(
@@ -1389,14 +1447,15 @@ async def p_rent(
     )
 
     await message.answer(
-        "📅 تاریخ تخلیه / وضعیت تخلیه:"
+        "📅 تاریخ تخلیه:\n"
+        "اگر خالی است بنویس «الان»"
     )
 
 
 @dp.message(PropertyForm.vacancy_date)
-async def p_vacancy(
+async def property_vacancy(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -1409,22 +1468,21 @@ async def p_vacancy(
 
     await message.answer(
         "📄 نوع سند:",
-        reply_markup=kb([
-            ["تک‌برگ", "اوقافی", "قدیمی"],
-            ["منگوله‌دار", "قولنامه‌ای", "سایر"],
-            ["❌ لغو"],
-        ]),
+        reply_markup=keyboard([
+            ["تک‌برگ", "منگوله‌دار"],
+            ["قولنامه‌ای", "نامشخص"]
+        ])
     )
 
 
 @dp.message(PropertyForm.document_type)
-async def p_document(
+async def property_document(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
-        document_type=message.text.strip()
+        document_type=message.text
     )
 
     await state.set_state(
@@ -1432,14 +1490,14 @@ async def p_document(
     )
 
     await message.answer(
-        "👨 مالک / سازنده:"
+        "👤 نام مالک / سازنده:"
     )
 
 
 @dp.message(PropertyForm.owner_name)
-async def p_owner_name(
+async def property_owner_name(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -1451,14 +1509,14 @@ async def p_owner_name(
     )
 
     await message.answer(
-        "📞 شماره مالک:"
+        "📞 شماره مالک / سازنده:"
     )
 
 
 @dp.message(PropertyForm.owner_phone)
-async def p_owner_phone(
+async def property_owner_phone(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -1475,9 +1533,9 @@ async def p_owner_phone(
 
 
 @dp.message(PropertyForm.description)
-async def p_description(
+async def property_description(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -1486,98 +1544,76 @@ async def p_description(
 
     data = await state.get_data()
 
+    preview = (
+        "📋 **پیش‌نمایش فایل**\n\n"
+        f"🔢 کد: {data.get('code')}\n"
+        f"📍 منطقه: {data.get('area')}\n"
+        f"🏠 آدرس: {data.get('address')}\n"
+        f"📐 متراژ: {money(data.get('sqm'))}\n"
+        f"💰 قیمت: {money(data.get('price'))}\n"
+        f"🏢 نوع: {data.get('property_type')}\n"
+        f"🛏 خواب: {data.get('bedrooms')}\n"
+        f"🏢 طبقات: {data.get('floors')}\n"
+        f"🏠 طبقه ملک: {data.get('unit_floor')}\n"
+        f"🚪 واحد در طبقه: {data.get('units_per_floor')}\n"
+        f"🛗 آسانسور: {data.get('elevator')}\n"
+        f"🚗 پارکینگ: {data.get('parking')}\n"
+        f"📦 انباری: {data.get('storage')}\n"
+        f"👤 مالک: {data.get('owner_name')}\n"
+        f"📞 تلفن: {data.get('owner_phone')}\n"
+        f"📝 توضیحات: {data.get('description')}\n"
+    )
+
     await state.set_state(
         PropertyForm.confirmation
     )
 
-    preview = f"""
-📋 <b>پیش‌نمایش فایل</b>
-
-🔢 کد: {data["code"]}
-📍 منطقه: {data["area"]}
-📐 متراژ: {data["sqm"]:g}
-💰 قیمت: {money(data["price"])}
-🏷 نوع: {data["property_type"]}
-🛏 خواب: {data["bedrooms"]}
-🏢 طبقه: {data["unit_floor"] or "همکف"} از {data["floors"]}
-🏗 واحد در طبقه: {data["units_per_floor"]}
-
-🛗 آسانسور: {data["elevator"]}
-🚗 پارکینگ: {data["parking"]} {data.get("parking_type", "")}
-📦 انباری: {data["storage"]}
-
-👤 مستأجر: {data["tenant"]}
-
-📄 سند: {data["document_type"]}
-
-👨 مالک: {data["owner_name"]}
-📞 {data["owner_phone"]}
-
-📝 {data["description"]}
-"""
-
     await message.answer(
         preview,
-        reply_markup=kb([
-            ["✅ ثبت نهایی"],
-            ["✏️ اصلاح", "❌ لغو"],
+        reply_markup=keyboard([
+            ["✅ ثبت نهایی", "✏️ اصلاح"],
+            ["❌ لغو"]
         ]),
+        parse_mode="Markdown"
     )
 
 
 @dp.message(PropertyForm.confirmation)
-async def p_confirmation(
+async def property_confirmation(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     if message.text == "✏️ اصلاح":
-
         await message.answer(
-            "برای اصلاح از صفحه فایل استفاده کن.\n"
-            "بعد از ثبت فایل، همه فیلدهای اصلی قابل ویرایش هستند."
+            "بعد از ثبت فایل می‌توانی هر فیلد را جداگانه اصلاح کنی."
         )
-
         return
 
     if message.text != "✅ ثبت نهایی":
-
-        await message.answer(
-            "یکی از گزینه‌ها را انتخاب کن."
-        )
-
         return
 
     data = await state.get_data()
 
     async with SessionLocal() as session:
 
-        user = await get_user(
-            session,
-            message.from_user,
+        result = await session.execute(
+            select(Property).where(
+                Property.code == data["code"]
+            )
         )
 
-        exists = (
-            await session.execute(
-                select(Property).where(
-                    Property.code == data["code"]
-                )
-            )
-        ).scalar_one_or_none()
-
-        if exists:
-
+        if result.scalar_one_or_none():
             await message.answer(
-                "⚠️ این کد همین الان توسط شخص دیگری ثبت شده."
+                "⚠️ این کد فایل قبلاً ثبت شده."
             )
-
             await state.clear()
-
             return
 
-        property_ = Property(
+        prop = Property(
             code=data["code"],
             area=data["area"],
+            address=data["address"],
             sqm=data["sqm"],
             price=data["price"],
             property_type=data["property_type"],
@@ -1585,462 +1621,253 @@ async def p_confirmation(
             floors=data["floors"],
             unit_floor=data["unit_floor"],
             units_per_floor=data["units_per_floor"],
-            elevator=data["elevator"],
-            parking=data["parking"],
-            parking_type=data.get(
-                "parking_type",
-                "",
-            ),
-            storage=data["storage"],
-            tenant=data["tenant"],
-            deposit=data.get(
-                "deposit",
-                0,
-            ),
-            rent=data.get(
-                "rent",
-                0,
-            ),
-            vacancy_date=data.get(
-                "vacancy_date",
-                "",
-            ),
-            document_type=data["document_type"],
-            owner_name=data["owner_name"],
-            owner_phone=data["owner_phone"],
-            description=data["description"],
+            elevator=data.get("elevator", ""),
+            parking=data.get("parking", ""),
+            parking_type=data.get("parking_type", ""),
+            storage=data.get("storage", ""),
+            tenant=data.get("tenant", ""),
+            deposit=data.get("deposit", 0),
+            rent=data.get("rent", 0),
+            vacancy_date=data.get("vacancy_date", ""),
+            document_type=data.get("document_type", ""),
+            owner_name=data.get("owner_name", ""),
+            owner_phone=data.get("owner_phone", ""),
+            description=data.get("description", ""),
             status="فعال",
-            transaction_value=0,
-            created_by=user.telegram_id,
-            updated_at=now(),
+            created_by=message.from_user.id,
+            updated_at=datetime.utcnow()
         )
 
-        session.add(property_)
+        session.add(prop)
+        await session.commit()
 
-        await session.flush()
+        user = await get_user(
+            session,
+            message.from_user.id,
+            message.from_user.full_name
+        )
 
         await add_activity(
             session,
             user.id,
             "ثبت فایل",
-            "ثبت اولیه فایل",
-            property_.id,
+            f"فایل {prop.code} ثبت شد.",
+            property_id=prop.id
         )
 
-        await session.commit()
-
-        count = await owner_count(
-            session,
-            property_.owner_name,
-            property_.owner_phone,
+        owner_count_result = await session.execute(
+            select(func.count(Property.id)).where(
+                Property.owner_name == prop.owner_name,
+                Property.owner_phone == prop.owner_phone
+            )
         )
 
-        await message.answer(
-            f"""
-✅ <b>فایل {property_.code} ثبت شد.</b>
-
-🟢 وضعیت: فعال
-
-👤 مالک:
-{property_.owner_name}
-
-📂 تعداد فایل‌های این مالک:
-<b>{count}</b>
-
-👨‍💼 ثبت‌کننده:
-{user.name}
-""",
-            reply_markup=MAIN,
-        )
+        owner_count_value = owner_count_result.scalar() or 0
 
     await state.clear()
 
+    await message.answer(
+        f"✅ فایل با موفقیت ثبت شد.\n\n"
+        f"🔢 کد: {data['code']}\n"
+        f"📍 منطقه: {data['area']}\n"
+        f"🏠 آدرس: {data['address']}\n"
+        f"👤 فایل‌های این مالک/سازنده: {owner_count_value}",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
+
 
 # =========================================================
-# FILE LIST
+# PROPERTY LIST
 # =========================================================
 
 @dp.message(F.text == "🏠 فایل‌ها")
-async def files(message: Message):
+async def property_list(
+    message: Message
+):
+
+    if not await access_required(message):
+        return
 
     async with SessionLocal() as session:
 
-        properties = list(
-            (
-                await session.execute(
-                    select(Property)
-                    .order_by(
-                        Property.created_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
+        result = await session.execute(
+            select(Property)
+            .order_by(Property.created_at.desc())
+            .limit(30)
         )
 
-        if not properties:
+        properties = result.scalars().all()
 
-            await message.answer(
-                "هنوز فایلی ثبت نشده.",
-                reply_markup=MAIN,
-            )
-
-            return
-
-        rows = []
-
-        for property_ in properties:
-
-            button_text = (
-                f"{STATUS_NAMES.get(property_.status, property_.status)} | "
-                f"{property_.code} | "
-                f"{property_.sqm:g}م | "
-                f"{money(property_.price)}"
-            )
-
-            rows.append([
-                (
-                    button_text,
-                    f"property:view:{property_.id}",
-                )
-            ])
-
+    if not properties:
         await message.answer(
-            "🏠 <b>فایل‌ها</b>\n\n"
-            "برای مشاهده جزئیات، روی فایل بزن:",
-            reply_markup=inline(rows),
+            "📭 هنوز فایلی ثبت نشده."
         )
+        return
 
+    rows = []
 
-@dp.callback_query(
-    F.data == "property:list"
-)
-async def property_list_callback(
-    call: CallbackQuery,
-):
-
-    await call.answer()
-
-    await files(
-        call.message
-    )
-
-
-# =========================================================
-# PROPERTY DETAIL
-# =========================================================
-
-async def property_text(
-    session,
-    property_,
-):
-
-    creator = (
-        await session.execute(
-            select(User).where(
-                User.telegram_id ==
-                property_.created_by
-            )
-        )
-    ).scalar_one_or_none()
-
-    count = await owner_count(
-        session,
-        property_.owner_name,
-        property_.owner_phone,
-    )
-
-    creator_name = (
-        creator.name
-        if creator
-        else "نامشخص"
-    )
-
-    tenant_text = property_.tenant
-
-    if property_.tenant == "دارد":
-
-        tenant_text += (
-            f"\n💵 ودیعه: {money(property_.deposit)}"
-            f"\n💵 اجاره: {money(property_.rent)}"
-            f"\n📅 تخلیه: {property_.vacancy_date}"
-        )
-
-    transaction = ""
-
-    if property_.transaction_value:
-
-        transaction = (
-            f"\n💰 ارزش معامله: "
-            f"{money(property_.transaction_value)}"
-        )
-
-    return f"""
-🏠 <b>فایل {property_.code}</b>
-
-📌 وضعیت:
-<b>{STATUS_NAMES.get(property_.status, property_.status)}</b>
-{transaction}
-
-📍 منطقه: {property_.area}
-📐 متراژ: {property_.sqm:g} متر
-💰 قیمت: {money(property_.price)}
-
-🏷 نوع ملک: {property_.property_type}
-🛏 خواب: {property_.bedrooms}
-
-🏢 طبقه:
-{property_.unit_floor or "همکف"} از {property_.floors}
-
-🏗 واحد در طبقه:
-{property_.units_per_floor}
-
-🛗 آسانسور:
-{property_.elevator}
-
-🚗 پارکینگ:
-{property_.parking}
-{property_.parking_type}
-
-📦 انباری:
-{property_.storage}
-
-👤 مستأجر:
-{tenant_text}
-
-📄 سند:
-{property_.document_type}
-
-👨 مالک:
-{property_.owner_name}
-
-📞 {property_.owner_phone}
-
-📂 تعداد فایل‌های همین مالک:
-<b>{count}</b>
-
-👨‍💼 ثبت‌کننده:
-{creator_name}
-
-🕒 تاریخ ثبت:
-{property_.created_at.strftime("%Y-%m-%d %H:%M")}
-
-📝 توضیحات:
-{property_.description or "—"}
-"""
-
-
-def property_actions(
-    property_id,
-):
-
-    return inline([
-        [
-            (
-                "✏️ ویرایش",
-                f"property:edit:{property_id}",
-            ),
-            (
-                "🔄 وضعیت",
-                f"property:status:{property_id}",
-            ),
-        ],
-        [
-            (
-                "📜 تاریخچه",
-                f"property:history:{property_id}",
-            ),
-            (
-                "📌 رویداد جدید",
-                f"property:event:{property_id}",
-            ),
-        ],
-        [
-            (
-                "👤 فایل‌های همین مالک",
-                f"property:owner:{property_id}",
-            )
-        ],
-        [
-            (
-                "🔙 بازگشت",
-                "property:list",
-            )
-        ],
-    ])
-
-
-@dp.callback_query(
-    F.data.startswith("property:view:")
-)
-async def property_view(
-    call: CallbackQuery,
-):
-
-    property_id = int(
-        call.data.split(":")[2]
-    )
-
-    async with SessionLocal() as session:
-
-        property_ = await session.get(
-            Property,
-            property_id,
-        )
-
-        if not property_:
-
-            await call.answer(
-                "فایل پیدا نشد.",
-                show_alert=True,
-            )
-
-            return
-
-        await call.message.edit_text(
-            await property_text(
-                session,
-                property_,
-            ),
-            reply_markup=property_actions(
-                property_id
-            ),
-        )
-
-    await call.answer()
-
-
-# =========================================================
-# OWNER FILES
-# =========================================================
-
-@dp.callback_query(
-    F.data.startswith("property:owner:")
-)
-async def property_owner(
-    call: CallbackQuery,
-):
-
-    property_id = int(
-        call.data.split(":")[2]
-    )
-
-    async with SessionLocal() as session:
-
-        property_ = await session.get(
-            Property,
-            property_id,
-        )
-
-        if not property_:
-
-            await call.answer(
-                "فایل پیدا نشد.",
-                show_alert=True,
-            )
-
-            return
-
-        owner_properties = await owner_files(
-            session,
-            property_.owner_name,
-            property_.owner_phone,
-        )
-
-        rows = []
-
-        for item in owner_properties:
-
-            rows.append([
-                (
-                    f"{STATUS_NAMES.get(item.status, item.status)} | "
-                    f"{item.code} | "
-                    f"{item.sqm:g}م",
-                    f"property:view:{item.id}",
-                )
-            ])
-
+    for p in properties:
         rows.append([
-            (
-                "🔙 برگشت",
-                f"property:view:{property_id}",
-            )
+            f"🏠 {p.code} | {p.area}"
         ])
 
-        await call.message.edit_text(
-            f"""
-👤 <b>فایل‌های مالک</b>
-
-نام:
-{property_.owner_name}
-
-📞 {property_.owner_phone}
-
-📂 تعداد فایل:
-<b>{len(owner_properties)}</b>
-""",
-            reply_markup=inline(rows),
+    await message.answer(
+        "📂 فایل‌ها:",
+        reply_markup=one_column(
+            [x[0] for x in rows]
         )
-
-    await call.answer()
-
-
-# =========================================================
-# STATUS
-# =========================================================
-
-@dp.callback_query(
-    F.data.startswith("property:status:")
-)
-async def property_status(
-    call: CallbackQuery,
-    state: FSMContext,
-):
-
-    property_id = int(
-        call.data.split(":")[2]
     )
 
-    await state.clear()
+
+@dp.message(F.text.startswith("🏠 "))
+async def property_open_from_list(
+    message: Message
+):
+
+    if not await access_required(message):
+        return
+
+    code = message.text.replace("🏠 ", "").split("|")[0].strip()
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Property).where(
+                Property.code == code
+            )
+        )
+
+        prop = result.scalar_one_or_none()
+
+        if not prop:
+            await message.answer(
+                "فایل پیدا نشد."
+            )
+            return
+
+        await show_property(
+            message,
+            session,
+            prop
+        )
+
+
+async def show_property(
+    message,
+    session,
+    prop
+):
+
+    result = await session.execute(
+        select(func.count(Property.id)).where(
+            Property.owner_name == prop.owner_name,
+            Property.owner_phone == prop.owner_phone
+        )
+    )
+
+    owner_count_value = result.scalar() or 0
+
+    text = (
+        f"🏠 **فایل {prop.code}**\n\n"
+        f"📍 منطقه: {prop.area}\n"
+        f"🏠 آدرس: {prop.address}\n"
+        f"📐 متراژ: {money(prop.sqm)}\n"
+        f"💰 قیمت: {money(prop.price)}\n"
+        f"🏢 نوع: {prop.property_type}\n"
+        f"🛏 خواب: {prop.bedrooms}\n"
+        f"🏢 کل طبقات: {prop.floors}\n"
+        f"🏠 طبقه ملک: {prop.unit_floor}\n"
+        f"🚪 واحد/طبقه: {prop.units_per_floor}\n"
+        f"🛗 آسانسور: {prop.elevator}\n"
+        f"🚗 پارکینگ: {prop.parking}\n"
+        f"📦 انباری: {prop.storage}\n"
+        f"👤 مالک: {prop.owner_name}\n"
+        f"📞 تلفن: {prop.owner_phone}\n"
+        f"📊 وضعیت: {prop.status}\n"
+        f"👥 تعداد فایل‌های مالک: {owner_count_value}\n\n"
+        f"📝 {prop.description}"
+    )
+
+    await message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="✏️ اصلاح",
+                        callback_data=f"edit:{prop.id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🔄 وضعیت",
+                        callback_data=f"status:{prop.id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="📜 تاریخچه",
+                        callback_data=f"history:{prop.id}"
+                    ),
+                    InlineKeyboardButton(
+                        text="🕒 رویداد",
+                        callback_data=f"event:{prop.id}"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="👤 فایل‌های مالک",
+                        callback_data=f"owner:{prop.id}"
+                    )
+                ]
+            ]
+        ),
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# PROPERTY STATUS
+# =========================================================
+
+@dp.callback_query(F.data.startswith("status:"))
+async def property_status_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    prop_id = int(
+        callback.data.split(":")[1]
+    )
 
     await state.update_data(
-        property_id=property_id
+        property_id=prop_id
     )
 
     await state.set_state(
         StatusForm.status
     )
 
-    await call.message.answer(
-        "🔄 وضعیت جدید فایل را انتخاب کن:",
-        reply_markup=kb([
-            ["فعال", "در مذاکره"],
-            [
-                "معامله شد - توسط ما",
-                "معامله شد - توسط دیگری",
-            ],
-            [
-                "منصرف شد",
-                "غیرفعال",
-            ],
-            ["❌ لغو"],
-        ]),
+    await callback.message.answer(
+        "وضعیت جدید فایل:",
+        reply_markup=one_column(
+            STATUSES
+        )
     )
 
-    await call.answer()
+    await callback.answer()
 
 
 @dp.message(StatusForm.status)
-async def status_set(
+async def property_status_save(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    if message.text not in STATUS_NAMES:
-
-        await message.answer(
-            "یکی از وضعیت‌ها را انتخاب کن."
-        )
-
+    if message.text not in STATUSES:
         return
 
     data = await state.get_data()
@@ -2049,504 +1876,212 @@ async def status_set(
         status=message.text
     )
 
-    if message.text == "معامله شد - توسط ما":
+    if message.text == "🔵 معامله شد - توسط ما":
 
         await state.set_state(
             StatusForm.transaction_value
         )
 
         await message.answer(
-            "💰 ارزش معامله را وارد کن.\n"
-            "اگر نمی‌خواهی ثبت کنی، ۰ وارد کن:"
+            "💰 ارزش معامله را وارد کن:"
         )
 
         return
 
     async with SessionLocal() as session:
 
-        property_ = await session.get(
-            Property,
-            data["property_id"],
+        result = await session.execute(
+            select(Property).where(
+                Property.id == data["property_id"]
+            )
         )
 
-        if not property_:
+        prop = result.scalar_one_or_none()
 
+        if not prop:
             await state.clear()
-
-            await message.answer(
-                "فایل پیدا نشد.",
-                reply_markup=MAIN,
-            )
-
             return
 
-        old_status = property_.status
+        old_status = prop.status
 
-        property_.status = message.text
-
-        property_.updated_at = now()
+        prop.status = message.text
+        prop.updated_at = datetime.utcnow()
 
         user = await get_user(
             session,
-            message.from_user,
+            message.from_user.id,
+            message.from_user.full_name
         )
 
         await add_activity(
             session,
             user.id,
-            "تغییر وضعیت",
-            f"{old_status} → {property_.status}",
-            property_.id,
+            "تغییر وضعیت فایل",
+            f"{old_status} → {message.text}",
+            property_id=prop.id
         )
 
         await session.commit()
 
-        await message.answer(
-            f"""
-✅ وضعیت فایل تغییر کرد.
-
-قبل:
-{STATUS_NAMES.get(old_status, old_status)}
-
-بعد:
-{STATUS_NAMES.get(property_.status, property_.status)}
-""",
-            reply_markup=MAIN,
-        )
-
     await state.clear()
 
+    await message.answer(
+        "✅ وضعیت فایل تغییر کرد.",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
 
-@dp.message(
-    StatusForm.transaction_value
-)
-async def status_transaction_value(
+
+@dp.message(StatusForm.transaction_value)
+async def property_transaction_value(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
-
-    try:
-
-        value = float(
-            message.text.replace(",", "")
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ فقط عدد وارد کن."
-        )
-
-        return
 
     data = await state.get_data()
 
     async with SessionLocal() as session:
 
-        property_ = await session.get(
-            Property,
-            data["property_id"],
+        result = await session.execute(
+            select(Property).where(
+                Property.id == data["property_id"]
+            )
         )
 
-        if not property_:
+        prop = result.scalar_one_or_none()
 
+        if not prop:
             await state.clear()
-
-            await message.answer(
-                "فایل پیدا نشد.",
-                reply_markup=MAIN,
-            )
-
             return
 
-        old_status = property_.status
+        old_status = prop.status
 
-        property_.status = (
-            "معامله شد - توسط ما"
-        )
-
-        property_.transaction_value = value
-
-        property_.updated_at = now()
+        prop.status = "🔵 معامله شد - توسط ما"
+        prop.transaction_value = number(message.text)
+        prop.updated_at = datetime.utcnow()
 
         user = await get_user(
             session,
-            message.from_user,
+            message.from_user.id,
+            message.from_user.full_name
         )
 
         await add_activity(
             session,
             user.id,
-            "معامله",
-            (
-                f"{old_status} → معامله شد توسط ما | "
-                f"ارزش معامله: {money(value)}"
-            ),
-            property_.id,
+            "معامله فایل",
+            f"{old_status} → معامله شد توسط ما | "
+            f"ارزش معامله: {money(prop.transaction_value)}",
+            property_id=prop.id
         )
 
         await session.commit()
 
-        await message.answer(
-            "🔵 معامله با موفقیت ثبت شد.\n\n"
-            "وضعیت: معامله شد - توسط ما",
-            reply_markup=MAIN,
-        )
-
     await state.clear()
 
-
-# =========================================================
-# EDIT PROPERTY
-# =========================================================
-
-EDIT_FIELDS = {
-    "price": "قیمت",
-    "sqm": "متراژ",
-    "area": "منطقه",
-    "bedrooms": "خواب",
-    "unit_floor": "طبقه ملک",
-    "floors": "تعداد کل طبقات",
-    "units_per_floor": "واحد در طبقه",
-    "tenant": "مستأجر",
-    "deposit": "ودیعه",
-    "rent": "اجاره",
-    "vacancy_date": "تاریخ تخلیه",
-    "document_type": "نوع سند",
-    "owner_name": "نام مالک",
-    "owner_phone": "شماره مالک",
-    "description": "توضیحات",
-}
-
-
-@dp.callback_query(
-    F.data.startswith("property:edit:")
-)
-async def property_edit_menu(
-    call: CallbackQuery,
-):
-
-    property_id = int(
-        call.data.split(":")[2]
-    )
-
-    rows = []
-
-    items = list(
-        EDIT_FIELDS.items()
-    )
-
-    for index in range(
-        0,
-        len(items),
-        2,
-    ):
-
-        row = []
-
-        for field, label in items[
-            index:index + 2
-        ]:
-
-            row.append(
-                (
-                    f"✏️ {label}",
-                    f"editfield:{property_id}:{field}",
-                )
-            )
-
-        rows.append(row)
-
-    rows.append([
-        (
-            "🔙 برگشت",
-            f"property:view:{property_id}",
+    await message.answer(
+        "✅ معامله ثبت شد.",
+        reply_markup=main_menu(
+            message.from_user.id
         )
-    ])
-
-    await call.message.edit_reply_markup(
-        reply_markup=inline(rows)
     )
-
-    await call.answer()
-
-
-@dp.callback_query(
-    F.data.startswith("editfield:")
-)
-async def edit_field(
-    call: CallbackQuery,
-    state: FSMContext,
-):
-
-    _, property_id, field = (
-        call.data.split(":")
-    )
-
-    await state.clear()
-
-    await state.update_data(
-        property_id=int(property_id),
-        field=field,
-    )
-
-    await state.set_state(
-        EditForm.value
-    )
-
-    await call.message.answer(
-        f"✏️ مقدار جدید «{EDIT_FIELDS[field]}» را وارد کن:",
-        reply_markup=CANCEL,
-    )
-
-    await call.answer()
-
-
-@dp.message(EditForm.value)
-async def edit_value(
-    message: Message,
-    state: FSMContext,
-):
-
-    data = await state.get_data()
-
-    field = data["field"]
-
-    property_id = data["property_id"]
-
-    async with SessionLocal() as session:
-
-        property_ = await session.get(
-            Property,
-            property_id,
-        )
-
-        if not property_:
-
-            await state.clear()
-
-            await message.answer(
-                "فایل پیدا نشد.",
-                reply_markup=MAIN,
-            )
-
-            return
-
-        old_value = getattr(
-            property_,
-            field,
-        )
-
-        try:
-
-            if field in (
-                "price",
-                "sqm",
-                "deposit",
-                "rent",
-            ):
-
-                new_value = float(
-                    message.text.replace(",", "")
-                )
-
-            elif field in (
-                "bedrooms",
-                "unit_floor",
-                "floors",
-                "units_per_floor",
-            ):
-
-                new_value = int(
-                    message.text
-                )
-
-            else:
-
-                new_value = message.text.strip()
-
-        except:
-
-            await message.answer(
-                "⚠️ مقدار واردشده درست نیست."
-            )
-
-            return
-
-        setattr(
-            property_,
-            field,
-            new_value,
-        )
-
-        property_.updated_at = now()
-
-        user = await get_user(
-            session,
-            message.from_user,
-        )
-
-        await add_activity(
-            session,
-            user.id,
-            "ویرایش فایل",
-            (
-                f"{EDIT_FIELDS[field]}: "
-                f"{old_value} → {new_value}"
-            ),
-            property_.id,
-        )
-
-        await session.commit()
-
-        await message.answer(
-            f"""
-✅ <b>{EDIT_FIELDS[field]}</b> تغییر کرد.
-
-قبل:
-{old_value}
-
-بعد:
-{new_value}
-""",
-            reply_markup=MAIN,
-        )
-
-    await state.clear()
 
 
 # =========================================================
 # PROPERTY HISTORY
 # =========================================================
 
-@dp.callback_query(
-    F.data.startswith("property:history:")
-)
+@dp.callback_query(F.data.startswith("history:"))
 async def property_history(
-    call: CallbackQuery,
+    callback: CallbackQuery
 ):
 
-    property_id = int(
-        call.data.split(":")[2]
+    if not await callback_access_required(callback):
+        return
+
+    prop_id = int(
+        callback.data.split(":")[1]
     )
 
     async with SessionLocal() as session:
 
-        property_ = await session.get(
-            Property,
-            property_id,
+        result = await session.execute(
+            select(Activity)
+            .where(
+                Activity.property_id == prop_id
+            )
+            .order_by(
+                Activity.created_at.desc()
+            )
+            .limit(30)
         )
 
-        activities = list(
-            (
-                await session.execute(
-                    select(Activity)
-                    .where(
-                        Activity.property_id ==
-                        property_id
-                    )
-                    .order_by(
-                        Activity.created_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
-        )
+        activities = result.scalars().all()
 
-        if not activities:
+    if not activities:
+        text = "📜 تاریخچه‌ای ثبت نشده."
+    else:
+        lines = ["📜 تاریخچه فایل:\n"]
 
-            text = (
-                f"📜 تاریخچه فایل "
-                f"{property_.code}\n\n"
-                "هنوز فعالیتی ثبت نشده."
+        for a in activities:
+            lines.append(
+                f"• {a.created_at.strftime('%Y-%m-%d %H:%M')} | "
+                f"{a.activity_type}\n"
+                f"  {a.note}"
             )
 
-        else:
+        text = "\n".join(lines)
 
-            lines = [
-                f"📜 <b>تاریخچه فایل {property_.code}</b>\n"
-            ]
-
-            for activity in activities:
-
-                user = await session.get(
-                    User,
-                    activity.user_id,
-                )
-
-                user_name = (
-                    user.name
-                    if user
-                    else "نامشخص"
-                )
-
-                lines.append(
-                    f"• {activity.created_at.strftime('%Y-%m-%d %H:%M')}\n"
-                    f"  {activity.activity_type}\n"
-                    f"  {activity.note}\n"
-                    f"  👤 {user_name}\n"
-                )
-
-            text = "\n".join(lines)
-
-        await call.message.edit_text(
-            text,
-            reply_markup=inline([
-                [
-                    (
-                        "🔙 برگشت",
-                        f"property:view:{property_id}",
-                    )
-                ]
-            ]),
-        )
-
-    await call.answer()
+    await callback.message.answer(text)
+    await callback.answer()
 
 
 # =========================================================
-# PROPERTY EVENTS
+# PROPERTY EVENT
 # =========================================================
 
-@dp.callback_query(
-    F.data.startswith("property:event:")
-)
+@dp.callback_query(F.data.startswith("event:"))
 async def event_start(
-    call: CallbackQuery,
-    state: FSMContext,
+    callback: CallbackQuery,
+    state: FSMContext
 ):
 
-    property_id = int(
-        call.data.split(":")[2]
+    if not await callback_access_required(callback):
+        return
+
+    prop_id = int(
+        callback.data.split(":")[1]
     )
 
-    await state.clear()
-
     await state.update_data(
-        property_id=property_id
+        property_id=prop_id
     )
 
     await state.set_state(
         EventForm.event_type
     )
 
-    await call.message.answer(
-        "📌 نوع رویداد را انتخاب کن:",
-        reply_markup=kb([
-            ["📞 تماس مالک", "🤝 مذاکره"],
-            ["👀 بازدید", "💰 تغییر قیمت"],
-            ["📄 قرارداد", "📝 سایر"],
-            ["❌ لغو"],
-        ]),
+    await callback.message.answer(
+        "نوع رویداد:",
+        reply_markup=one_column([
+            "تماس با مالک",
+            "بازدید",
+            "مذاکره",
+            "تغییر قیمت",
+            "قرارداد",
+            "پیگیری",
+            "سایر"
+        ])
     )
 
-    await call.answer()
+    await callback.answer()
 
 
 @dp.message(EventForm.event_type)
 async def event_type(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -2558,57 +2093,121 @@ async def event_type(
     )
 
     await message.answer(
-        "📝 شرح رویداد را بنویس:"
+        "توضیح رویداد:"
     )
 
 
 @dp.message(EventForm.note)
-async def event_note(
+async def event_save(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     data = await state.get_data()
 
     async with SessionLocal() as session:
 
-        property_ = await session.get(
-            Property,
-            data["property_id"],
-        )
-
         user = await get_user(
             session,
-            message.from_user,
+            message.from_user.id,
+            message.from_user.full_name
         )
 
         await add_activity(
             session,
             user.id,
             data["event_type"],
-            message.text.strip(),
-            property_.id if property_ else None,
-        )
-
-        await session.commit()
-
-        await message.answer(
-            "📌 رویداد با موفقیت ثبت شد.",
-            reply_markup=MAIN,
+            message.text,
+            property_id=data["property_id"]
         )
 
     await state.clear()
 
+    await message.answer(
+        "✅ رویداد ثبت شد.",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
+
 
 # =========================================================
-# CLIENT
+# OWNER FILES
+# =========================================================
+
+@dp.callback_query(F.data.startswith("owner:"))
+async def owner_files(
+    callback: CallbackQuery
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    prop_id = int(
+        callback.data.split(":")[1]
+    )
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Property).where(
+                Property.id == prop_id
+            )
+        )
+
+        prop = result.scalar_one_or_none()
+
+        if not prop:
+            await callback.answer(
+                "فایل پیدا نشد.",
+                show_alert=True
+            )
+            return
+
+        result = await session.execute(
+            select(Property)
+            .where(
+                Property.owner_name == prop.owner_name,
+                Property.owner_phone == prop.owner_phone
+            )
+            .order_by(
+                Property.created_at.desc()
+            )
+        )
+
+        files = result.scalars().all()
+
+    lines = [
+        f"👤 فایل‌های {prop.owner_name}:\n"
+    ]
+
+    for p in files:
+        lines.append(
+            f"🏠 {p.code} | "
+            f"{p.area} | "
+            f"{money(p.sqm)} متر | "
+            f"{p.status}"
+        )
+
+    await callback.message.answer(
+        "\n".join(lines)
+    )
+
+    await callback.answer()
+
+
+# =========================================================
+# CLIENT REGISTRATION
 # =========================================================
 
 @dp.message(F.text == "➕ ثبت مشتری")
-async def add_client(
+async def client_start(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
+
+    if not await access_required(message):
+        return
 
     await state.clear()
 
@@ -2617,15 +2216,15 @@ async def add_client(
     )
 
     await message.answer(
-        "👤 نام مشتری:",
-        reply_markup=CANCEL,
+        "➕ ثبت مشتری\n\n"
+        "نام مشتری:"
     )
 
 
 @dp.message(ClientForm.name)
-async def c_name(
+async def client_name(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -2637,14 +2236,14 @@ async def c_name(
     )
 
     await message.answer(
-        "📞 شماره تماس:"
+        "📞 شماره مشتری:"
     )
 
 
 @dp.message(ClientForm.phone)
-async def c_phone(
+async def client_phone(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -2656,18 +2255,27 @@ async def c_phone(
     )
 
     await message.answer(
-        "📍 منطقه / محله موردنظر:"
+        "📍 منطقه موردنظر مشتری:",
+        reply_markup=one_column(
+            AREAS
+        )
     )
 
 
 @dp.message(ClientForm.area)
-async def c_area(
+async def client_area(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
+    if message.text not in AREAS:
+        await message.answer(
+            "لطفاً یکی از مناطق را انتخاب کن."
+        )
+        return
+
     await state.update_data(
-        area=message.text.strip()
+        area=message.text
     )
 
     await state.set_state(
@@ -2680,27 +2288,13 @@ async def c_area(
 
 
 @dp.message(ClientForm.min_sqm)
-async def c_min_sqm(
+async def client_min_sqm(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = float(
-            message.text
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ عدد وارد کن."
-        )
-
-        return
-
     await state.update_data(
-        min_sqm=value
+        min_sqm=number(message.text)
     )
 
     await state.set_state(
@@ -2713,27 +2307,13 @@ async def c_min_sqm(
 
 
 @dp.message(ClientForm.max_sqm)
-async def c_max_sqm(
+async def client_max_sqm(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = float(
-            message.text
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ عدد وارد کن."
-        )
-
-        return
-
     await state.update_data(
-        max_sqm=value
+        max_sqm=number(message.text)
     )
 
     await state.set_state(
@@ -2746,27 +2326,13 @@ async def c_max_sqm(
 
 
 @dp.message(ClientForm.min_budget)
-async def c_min_budget(
+async def client_min_budget(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = float(
-            message.text
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ عدد وارد کن."
-        )
-
-        return
-
     await state.update_data(
-        min_budget=value
+        min_budget=number(message.text)
     )
 
     await state.set_state(
@@ -2779,27 +2345,13 @@ async def c_min_budget(
 
 
 @dp.message(ClientForm.max_budget)
-async def c_max_budget(
+async def client_max_budget(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    try:
-
-        value = float(
-            message.text
-        )
-
-    except:
-
-        await message.answer(
-            "⚠️ عدد وارد کن."
-        )
-
-        return
-
     await state.update_data(
-        max_budget=value
+        max_budget=number(message.text)
     )
 
     await state.set_state(
@@ -2807,60 +2359,24 @@ async def c_max_budget(
     )
 
     await message.answer(
-        "🏷 نوع ملک موردنظر:"
+        "🏢 نوع ملک موردنظر:",
+        reply_markup=one_column(
+            PROPERTY_TYPES
+        )
     )
 
 
 @dp.message(ClientForm.property_type)
-async def c_property_type(
+async def client_property_type(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    await state.update_data(
-        property_type=message.text.strip()
-    )
-
-    await state.set_state(
-        ClientForm.bedrooms
-    )
-
-    await message.answer(
-        "🛏 تعداد خواب:",
-        reply_markup=bedrooms_keyboard(),
-    )
-
-
-@dp.message(ClientForm.bedrooms)
-async def c_bedrooms(
-    message: Message,
-    state: FSMContext,
-):
-
-    if message.text == "+۵":
-
-        await message.answer(
-            "تعداد خواب را عددی وارد کن:"
-        )
-
-        return
-
-    try:
-
-        value = int(
-            message.text
-        )
-
-    except:
-
-        await message.answer(
-            "یکی از گزینه‌ها را انتخاب کن."
-        )
-
+    if message.text not in PROPERTY_TYPES:
         return
 
     await state.update_data(
-        bedrooms=value
+        property_type=message.text
     )
 
     await state.set_state(
@@ -2873,19 +2389,14 @@ async def c_bedrooms(
 
 
 @dp.message(ClientForm.description)
-async def c_description(
+async def client_save(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     data = await state.get_data()
 
     async with SessionLocal() as session:
-
-        user = await get_user(
-            session,
-            message.from_user,
-        )
 
         client = Client(
             name=data["name"],
@@ -2896,32 +2407,37 @@ async def c_description(
             min_budget=data["min_budget"],
             max_budget=data["max_budget"],
             property_type=data["property_type"],
-            bedrooms=data["bedrooms"],
-            description=message.text.strip(),
-            created_by=user.telegram_id,
+            bedrooms=0,
+            description=message.text,
+            status="فعال",
+            created_by=message.from_user.id
         )
 
         session.add(client)
+        await session.commit()
 
-        await session.flush()
+        user = await get_user(
+            session,
+            message.from_user.id,
+            message.from_user.full_name
+        )
 
         await add_activity(
             session,
             user.id,
             "ثبت مشتری",
-            "مشتری جدید",
-            None,
-            client.id,
-        )
-
-        await session.commit()
-
-        await message.answer(
-            f"✅ مشتری «{client.name}» ثبت شد.",
-            reply_markup=MAIN,
+            f"مشتری {client.name} ثبت شد.",
+            client_id=client.id
         )
 
     await state.clear()
+
+    await message.answer(
+        "✅ مشتری ثبت شد.",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
 
 
 # =========================================================
@@ -2929,156 +2445,205 @@ async def c_description(
 # =========================================================
 
 @dp.message(F.text == "👤 مشتری‌ها")
-async def clients(
-    message: Message,
+async def client_list(
+    message: Message
 ):
+
+    if not await access_required(message):
+        return
 
     async with SessionLocal() as session:
 
-        clients_ = list(
-            (
-                await session.execute(
-                    select(Client)
-                    .order_by(
-                        Client.created_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
+        result = await session.execute(
+            select(Client)
+            .order_by(Client.created_at.desc())
+            .limit(50)
         )
 
-        if not clients_:
+        clients = result.scalars().all()
 
-            await message.answer(
-                "هنوز مشتری ثبت نشده.",
-                reply_markup=MAIN,
-            )
-
-            return
-
-        rows = []
-
-        for client in clients_:
-
-            rows.append([
-                (
-                    f"👤 {client.name} | {client.phone}",
-                    f"client:view:{client.id}",
-                )
-            ])
-
+    if not clients:
         await message.answer(
-            "👤 <b>مشتری‌ها</b>",
-            reply_markup=inline(rows),
+            "📭 هنوز مشتری‌ای ثبت نشده."
+        )
+        return
+
+    lines = ["👤 مشتری‌ها:\n"]
+
+    buttons = []
+
+    for c in clients:
+
+        budget = (
+            f"{money(c.min_budget)} تا "
+            f"{money(c.max_budget)}"
         )
 
+        status_icon = {
+            "فعال": "🟢",
+            "خرید کرده": "🔵",
+            "منصرف شده": "🔴"
+        }.get(c.status, "⚪")
 
-@dp.callback_query(
-    F.data == "client:list"
-)
-async def client_list_callback(
-    call: CallbackQuery,
-):
+        lines.append(
+            f"{status_icon} {c.name} | "
+            f"💰 {budget}"
+        )
 
-    await call.answer()
+        buttons.append([
+            f"👤 {c.name} | {c.id}"
+        ])
 
-    await clients(
-        call.message
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=one_column(
+            [x[0] for x in buttons]
+        )
     )
 
 
-@dp.callback_query(
-    F.data.startswith("client:view:")
-)
-async def client_view(
-    call: CallbackQuery,
+@dp.message(F.text.startswith("👤 "))
+async def client_detail(
+    message: Message
 ):
 
-    client_id = int(
-        call.data.split(":")[2]
-    )
+    if not await access_required(message):
+        return
+
+    try:
+        client_id = int(
+            message.text.split("|")[-1].strip()
+        )
+    except Exception:
+        return
 
     async with SessionLocal() as session:
 
-        client = await session.get(
-            Client,
-            client_id,
+        result = await session.execute(
+            select(Client).where(
+                Client.id == client_id
+            )
         )
+
+        client = result.scalar_one_or_none()
 
         if not client:
-
-            await call.answer(
-                "مشتری پیدا نشد.",
-                show_alert=True,
+            await message.answer(
+                "مشتری پیدا نشد."
             )
-
             return
 
-        visits = list(
-            (
-                await session.execute(
-                    select(Visit)
-                    .where(
-                        Visit.client_id ==
-                        client_id
-                    )
-                    .order_by(
-                        Visit.visited_at.desc()
-                    )
-                    .limit(20)
-                )
-            ).scalars().all()
-        )
-
-        lines = [
-            f"👤 <b>{client.name}</b>",
-            f"📞 {client.phone}",
-            f"📍 {client.area}",
-            (
-                f"📐 {client.min_sqm:g}"
-                f" تا {client.max_sqm:g} متر"
-            ),
-            (
-                f"💰 {money(client.min_budget)}"
-                f" تا {money(client.max_budget)}"
-            ),
-            f"🏷 {client.property_type}",
-            f"🛏 خواب: {client.bedrooms}",
-            f"👀 تعداد بازدید: {len(visits)}",
-        ]
-
-        if visits:
-
-            lines.append(
-                "\n📋 <b>آخرین بازدیدها:</b>"
-            )
-
-            for visit in visits[:10]:
-
-                property_ = await session.get(
-                    Property,
-                    visit.property_id,
-                )
-
-                lines.append(
-                    f"• {property_.code if property_ else '?'}"
-                    f" | {visit.visited_at.strftime('%Y-%m-%d %H:%M')}"
-                    f" | {visit.next_action}"
-                )
-
-        await call.message.edit_text(
-            "\n".join(lines),
-            reply_markup=inline([
+    await message.answer(
+        f"👤 **{client.name}**\n\n"
+        f"📞 تلفن: {client.phone}\n"
+        f"📍 منطقه: {client.area}\n"
+        f"📐 متراژ: {money(client.min_sqm)} تا {money(client.max_sqm)}\n"
+        f"💰 بودجه: {money(client.min_budget)} تا {money(client.max_budget)}\n"
+        f"🏢 نوع ملک: {client.property_type}\n"
+        f"📊 وضعیت: {client.status}\n"
+        f"📝 توضیحات: {client.description}",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=[
                 [
-                    (
-                        "🔙 مشتری‌ها",
-                        "client:list",
+                    InlineKeyboardButton(
+                        text="🔄 تغییر وضعیت",
+                        callback_data=f"clientstatus:{client.id}"
                     )
                 ]
-            ]),
+            ]
+        ),
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# CLIENT STATUS
+# =========================================================
+
+@dp.callback_query(F.data.startswith("clientstatus:"))
+async def client_status_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    client_id = int(
+        callback.data.split(":")[1]
+    )
+
+    await state.update_data(
+        client_id=client_id
+    )
+
+    await state.set_state(
+        ClientStatusForm.status
+    )
+
+    await callback.message.answer(
+        "وضعیت مشتری:",
+        reply_markup=one_column(
+            CLIENT_STATUSES
+        )
+    )
+
+    await callback.answer()
+
+
+@dp.message(ClientStatusForm.status)
+async def client_status_save(
+    message: Message,
+    state: FSMContext
+):
+
+    if message.text not in CLIENT_STATUSES:
+        return
+
+    data = await state.get_data()
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Client).where(
+                Client.id == data["client_id"]
+            )
         )
 
-    await call.answer()
+        client = result.scalar_one_or_none()
+
+        if not client:
+            await state.clear()
+            return
+
+        old_status = client.status
+
+        client.status = message.text
+
+        user = await get_user(
+            session,
+            message.from_user.id,
+            message.from_user.full_name
+        )
+
+        await add_activity(
+            session,
+            user.id,
+            "تغییر وضعیت مشتری",
+            f"{old_status} → {message.text}",
+            client_id=client.id
+        )
+
+        await session.commit()
+
+    await state.clear()
+
+    await message.answer(
+        f"✅ وضعیت {client.name} شد: {message.text}",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
 
 
 # =========================================================
@@ -3088,64 +2653,57 @@ async def client_view(
 @dp.message(F.text == "👀 ثبت بازدید")
 async def visit_start(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
-    await state.clear()
+    if not await access_required(message):
+        return
 
     async with SessionLocal() as session:
 
-        clients_ = list(
-            (
-                await session.execute(
-                    select(Client)
-                    .order_by(
-                        Client.created_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
-        )
-
-        if not clients_:
-
-            await message.answer(
-                "اول مشتری ثبت کن.",
-                reply_markup=MAIN,
+        result = await session.execute(
+            select(Client)
+            .where(
+                Client.status == "فعال"
             )
-
-            return
-
-        rows = []
-
-        for client in clients_:
-
-            rows.append([
-                (
-                    f"👤 {client.name}",
-                    f"visitclient:{client.id}",
-                )
-            ])
-
-        await message.answer(
-            "👤 مشتری را انتخاب کن:",
-            reply_markup=inline(rows),
+            .order_by(Client.created_at.desc())
         )
 
+        clients = result.scalars().all()
 
-@dp.callback_query(
-    F.data.startswith("visitclient:")
-)
-async def visit_client(
-    call: CallbackQuery,
-    state: FSMContext,
-):
-
-    client_id = int(
-        call.data.split(":")[1]
-    )
+    if not clients:
+        await message.answer(
+            "اول یک مشتری فعال ثبت کن."
+        )
+        return
 
     await state.clear()
+
+    await state.set_state(
+        VisitForm.client_id
+    )
+
+    await message.answer(
+        "👤 مشتری را انتخاب کن:",
+        reply_markup=one_column([
+            f"{c.name} | {c.id}"
+            for c in clients
+        ])
+    )
+
+
+@dp.message(VisitForm.client_id)
+async def visit_client(
+    message: Message,
+    state: FSMContext
+):
+
+    try:
+        client_id = int(
+            message.text.split("|")[-1].strip()
+        )
+    except Exception:
+        return
 
     await state.update_data(
         client_id=client_id
@@ -3153,217 +2711,93 @@ async def visit_client(
 
     async with SessionLocal() as session:
 
-        properties = list(
-            (
-                await session.execute(
-                    select(Property)
-                    .where(
-                        Property.status.in_([
-                            "فعال",
-                            "در مذاکره",
-                        ])
-                    )
-                    .order_by(
-                        Property.created_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
-        )
-
-        if not properties:
-
-            await call.message.answer(
-                "فایل فعال نداریم."
+        result = await session.execute(
+            select(Property)
+            .where(
+                Property.status.in_([
+                    "🟢 فعال",
+                    "🟡 در مذاکره",
+                    "فعال",
+                    "در مذاکره"
+                ])
             )
-
-            return
-
-        rows = []
-
-        for property_ in properties:
-
-            rows.append([
-                (
-                    f"{property_.code} | "
-                    f"{property_.area} | "
-                    f"{property_.sqm:g}م | "
-                    f"{money(property_.price)}",
-                    f"visitproperty:{property_.id}",
-                )
-            ])
-
-        await call.message.answer(
-            "🏠 فایل بازدیدشده را انتخاب کن:",
-            reply_markup=inline(rows),
+            .order_by(Property.created_at.desc())
         )
 
-    await call.answer()
+        properties = result.scalars().all()
+
+    if not properties:
+        await message.answer(
+            "فایل فعالی وجود ندارد."
+        )
+        await state.clear()
+        return
+
+    await state.set_state(
+        VisitForm.property_id
+    )
+
+    await message.answer(
+        "🏠 فایل را انتخاب کن:",
+        reply_markup=one_column([
+            f"{p.code} | {p.area} | {money(p.sqm)} متر"
+            for p in properties
+        ])
+    )
 
 
-@dp.callback_query(
-    F.data.startswith("visitproperty:")
-)
+@dp.message(VisitForm.property_id)
 async def visit_property(
-    call: CallbackQuery,
-    state: FSMContext,
+    message: Message,
+    state: FSMContext
 ):
 
-    property_id = int(
-        call.data.split(":")[1]
-    )
-
-    data = await state.get_data()
-
-    client_id = data.get(
-        "client_id"
-    )
-
-    if not client_id:
-
-        await call.answer(
-            "جلسه ثبت بازدید منقضی شده.",
-            show_alert=True,
-        )
-
-        return
+    code = message.text.split("|")[0].strip()
 
     async with SessionLocal() as session:
 
-        previous_visits = list(
-            (
-                await session.execute(
-                    select(Visit)
-                    .where(
-                        Visit.client_id ==
-                        client_id,
-                        Visit.property_id ==
-                        property_id,
-                    )
-                    .order_by(
-                        Visit.visited_at.desc()
-                    )
-                )
-            ).scalars().all()
+        result = await session.execute(
+            select(Property).where(
+                Property.code == code
+            )
         )
 
-        if previous_visits:
+        prop = result.scalar_one_or_none()
 
-            last = previous_visits[0]
-
-            property_ = await session.get(
-                Property,
-                property_id,
+        if not prop:
+            await message.answer(
+                "فایل پیدا نشد."
             )
-
-            client = await session.get(
-                Client,
-                client_id,
-            )
-
-            agent = await session.get(
-                User,
-                last.agent_id,
-            )
-
-            await call.message.answer(
-                f"""
-⚠️ <b>این مشتری قبلاً از این فایل بازدید کرده است.</b>
-
-👤 مشتری:
-{client.name}
-
-🏠 فایل:
-{property_.code}
-
-👨‍💼 بازدید قبلی توسط:
-{agent.name if agent else "نامشخص"}
-
-🕒 تاریخ قبلی:
-{last.visited_at.strftime("%Y-%m-%d %H:%M")}
-
-آیا بازدید مجدد را ثبت می‌کنی؟
-""",
-                reply_markup=inline([
-                    [
-                        (
-                            "❌ لغو",
-                            "visitcancel",
-                        ),
-                        (
-                            "🔄 ثبت بازدید مجدد",
-                            f"visitrepeat:{client_id}:{property_id}",
-                        ),
-                    ]
-                ]),
-            )
-
-            await call.answer()
-
             return
 
-    await start_scorecard(
-        call.message,
-        state,
-        client_id,
-        property_id,
-    )
+        data = await state.get_data()
 
-    await call.answer()
+        previous_result = await session.execute(
+            select(Visit)
+            .where(
+                Visit.client_id == data["client_id"],
+                Visit.property_id == prop.id
+            )
+            .order_by(
+                Visit.visited_at.desc()
+            )
+        )
 
+        previous = previous_result.scalars().first()
 
-@dp.callback_query(
-    F.data.startswith("visitrepeat:")
-)
-async def visit_repeat(
-    call: CallbackQuery,
-    state: FSMContext,
-):
+        if previous:
 
-    _, client_id, property_id = (
-        call.data.split(":")
-    )
-
-    await start_scorecard(
-        call.message,
-        state,
-        int(client_id),
-        int(property_id),
-    )
-
-    await call.answer()
-
-
-@dp.callback_query(
-    F.data == "visitcancel"
-)
-async def visit_cancel(
-    call: CallbackQuery,
-    state: FSMContext,
-):
-
-    await state.clear()
-
-    await call.message.answer(
-        "❌ بازدید لغو شد.",
-        reply_markup=MAIN,
-    )
-
-    await call.answer()
-
-
-async def start_scorecard(
-    message,
-    state,
-    client_id,
-    property_id,
-):
-
-    await state.clear()
+            await message.answer(
+                "⚠️ این مشتری قبلاً این فایل را دیده است.\n\n"
+                f"آخرین بازدید: "
+                f"{previous.visited_at.strftime('%Y-%m-%d %H:%M')}\n"
+                f"علاقه: {previous.interest}\n"
+                f"پیگیری بعدی: {previous.followup_date}\n\n"
+                "برای ثبت بازدید مجدد دوباره ادامه بده."
+            )
 
     await state.update_data(
-        client_id=client_id,
-        property_id=property_id,
+        property_id=prop.id
     )
 
     await state.set_state(
@@ -3371,25 +2805,17 @@ async def start_scorecard(
     )
 
     await message.answer(
-        """
-👀 <b>بازدید ثبت شد.</b>
-
-حالا نوبت <b>کارنامه بازدید</b> است.
-
-🔥 میزان علاقه مشتری؟
-""",
-        reply_markup=kb([
-            ["🔥 خیلی زیاد", "🟢 زیاد"],
-            ["🟡 متوسط", "🔴 کم"],
-            ["❌ رد"],
-        ]),
+        "🔥 میزان علاقه مشتری:",
+        reply_markup=one_column(
+            INTERESTS
+        )
     )
 
 
 @dp.message(VisitForm.interest)
-async def v_interest(
+async def visit_interest(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -3401,21 +2827,17 @@ async def v_interest(
     )
 
     await message.answer(
-        "💰 واکنش مشتری به قیمت؟",
-        reply_markup=kb([
-            ["✅ مناسب", "🟡 کمی بالا"],
-            ["🔴 بالا", "❌ خیلی بالا"],
-            ["❓ نظر نداد"],
-        ]),
+        "💰 واکنش به قیمت:",
+        reply_markup=one_column(
+            PRICE_REACTIONS
+        )
     )
 
 
-@dp.message(
-    VisitForm.price_reaction
-)
-async def v_price(
+@dp.message(VisitForm.price_reaction)
+async def visit_price(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -3427,20 +2849,17 @@ async def v_price(
     )
 
     await message.answer(
-        "🏠 نظر کلی مشتری درباره ملک؟",
-        reply_markup=kb([
-            ["❤️ پسندید", "🟡 متوسط"],
-            ["👎 نپسندید", "❓ نامشخص"],
-        ]),
+        "🏠 واکنش به ملک:",
+        reply_markup=one_column(
+            PROPERTY_REACTIONS
+        )
     )
 
 
-@dp.message(
-    VisitForm.property_reaction
-)
-async def v_reaction(
+@dp.message(VisitForm.property_reaction)
+async def visit_property_reaction(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -3452,21 +2871,18 @@ async def v_reaction(
     )
 
     await message.answer(
-        "❗ اعتراض / ایراد اصلی مشتری چیست؟\n"
-        "اگر ندارد بنویس: ندارد"
+        "❗ ایراد / اعتراض مشتری را بنویس:"
     )
 
 
-@dp.message(
-    VisitForm.objection
-)
-async def v_objection(
+@dp.message(VisitForm.objection)
+async def visit_objection(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
-        objection=message.text.strip()
+        objection=message.text
     )
 
     await state.set_state(
@@ -3474,21 +2890,17 @@ async def v_objection(
     )
 
     await message.answer(
-        "➡️ قدم بعدی چیست؟",
-        reply_markup=kb([
-            ["📞 پیگیری", "🔄 بازدید مجدد"],
-            ["🤝 مذاکره", "📄 قرارداد"],
-            ["❌ رد شد", "⏳ فعلاً صبر"],
-        ]),
+        "➡️ اقدام بعدی:",
+        reply_markup=one_column(
+            NEXT_ACTIONS
+        )
     )
 
 
-@dp.message(
-    VisitForm.next_action
-)
-async def v_next(
+@dp.message(VisitForm.next_action)
+async def visit_next_action(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
@@ -3500,22 +2912,20 @@ async def v_next(
     )
 
     await message.answer(
-        "📅 تاریخ پیگیری بعدی را بنویس.\n"
-        "مثلاً: 1405/07/02\n"
-        "یا بنویس: ندارد"
+        "📅 تاریخ پیگیری بعدی را وارد کن.\n"
+        "مثلاً: ۱۴۰۵/۰۷/۰۱\n"
+        "اگر نیاز نیست: «ندارد»"
     )
 
 
-@dp.message(
-    VisitForm.followup_date
-)
-async def v_followup(
+@dp.message(VisitForm.followup_date)
+async def visit_followup(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     await state.update_data(
-        followup_date=message.text.strip()
+        followup_date=message.text
     )
 
     await state.set_state(
@@ -3523,352 +2933,59 @@ async def v_followup(
     )
 
     await message.answer(
-        "📝 یادداشت نهایی بازدید:"
+        "📝 یادداشت بازدید:"
     )
 
 
 @dp.message(VisitForm.note)
-async def v_note(
+async def visit_save(
     message: Message,
-    state: FSMContext,
+    state: FSMContext
 ):
 
     data = await state.get_data()
 
     async with SessionLocal() as session:
 
-        user = await get_user(
-            session,
-            message.from_user,
-        )
-
         visit = Visit(
             property_id=data["property_id"],
             client_id=data["client_id"],
-            agent_id=user.id,
+            agent_id=message.from_user.id,
             interest=data["interest"],
             price_reaction=data["price_reaction"],
             property_reaction=data["property_reaction"],
             objection=data["objection"],
             next_action=data["next_action"],
             followup_date=data["followup_date"],
-            note=message.text.strip(),
-            outcome=(
-                f"{data['interest']} | "
-                f"{data['property_reaction']} | "
-                f"قدم بعدی: {data['next_action']}"
-            ),
+            note=message.text
         )
 
         session.add(visit)
+        await session.commit()
 
-        await session.flush()
+        user = await get_user(
+            session,
+            message.from_user.id,
+            message.from_user.full_name
+        )
 
         await add_activity(
             session,
             user.id,
-            "کارنامه بازدید",
-            (
-                f"علاقه: {visit.interest} | "
-                f"قیمت: {visit.price_reaction} | "
-                f"نظر: {visit.property_reaction} | "
-                f"قدم بعدی: {visit.next_action} | "
-                f"ایراد: {visit.objection}"
-            ),
-            visit.property_id,
-            visit.client_id,
-        )
-
-        await session.commit()
-
-        await message.answer(
-            f"""
-✅ <b>کارنامه بازدید ثبت شد.</b>
-
-🔥 علاقه:
-{visit.interest}
-
-💰 واکنش قیمت:
-{visit.price_reaction}
-
-🏠 نظر ملک:
-{visit.property_reaction}
-
-➡️ قدم بعدی:
-{visit.next_action}
-
-📅 پیگیری:
-{visit.followup_date}
-""",
-            reply_markup=MAIN,
+            "ثبت بازدید",
+            f"اقدام بعدی: {data['next_action']}",
+            property_id=data["property_id"],
+            client_id=data["client_id"]
         )
 
     await state.clear()
 
-
-# =========================================================
-# MATCHING
-# =========================================================
-
-@dp.message(F.text == "🔎 پیشنهاد فایل")
-async def matching(
-    message: Message,
-):
-
-    async with SessionLocal() as session:
-
-        clients_ = list(
-            (
-                await session.execute(
-                    select(Client)
-                    .order_by(
-                        Client.created_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
+    await message.answer(
+        "✅ کارنامه بازدید ثبت شد.",
+        reply_markup=main_menu(
+            message.from_user.id
         )
-
-        if not clients_:
-
-            await message.answer(
-                "اول مشتری ثبت کن.",
-                reply_markup=MAIN,
-            )
-
-            return
-
-        rows = []
-
-        for client in clients_:
-
-            rows.append([
-                (
-                    f"👤 {client.name}",
-                    f"match:{client.id}",
-                )
-            ])
-
-        await message.answer(
-            "🔎 برای کدام مشتری پیشنهاد فایل می‌خواهی؟",
-            reply_markup=inline(rows),
-        )
-
-
-@dp.callback_query(
-    F.data.startswith("match:")
-)
-async def match_client(
-    call: CallbackQuery,
-):
-
-    client_id = int(
-        call.data.split(":")[1]
     )
-
-    async with SessionLocal() as session:
-
-        client = await session.get(
-            Client,
-            client_id,
-        )
-
-        visited = set(
-            (
-                await session.execute(
-                    select(
-                        Visit.property_id
-                    ).where(
-                        Visit.client_id ==
-                        client_id
-                    )
-                )
-            ).scalars().all()
-        )
-
-        properties = list(
-            (
-                await session.execute(
-                    select(Property)
-                    .where(
-                        Property.status ==
-                        "فعال"
-                    )
-                )
-            ).scalars().all()
-        )
-
-        scored = []
-
-        for property_ in properties:
-
-            score = 0
-
-            if (
-                client.max_budget
-                and property_.price <=
-                client.max_budget
-            ):
-
-                score += 40
-
-            elif not client.max_budget:
-
-                score += 20
-
-            if (
-                client.area
-                and client.area in property_.area
-            ):
-
-                score += 25
-
-            elif not client.area:
-
-                score += 12
-
-            if (
-                client.max_sqm
-                and client.min_sqm <=
-                property_.sqm <=
-                client.max_sqm
-            ):
-
-                score += 20
-
-            elif not client.max_sqm:
-
-                score += 10
-
-            if (
-                client.property_type
-                and client.property_type.strip()
-                == property_.property_type.strip()
-            ):
-
-                score += 10
-
-            elif not client.property_type:
-
-                score += 5
-
-            if (
-                client.bedrooms == 0
-                or client.bedrooms ==
-                property_.bedrooms
-            ):
-
-                score += 5
-
-            scored.append(
-                (
-                    score,
-                    property_,
-                    property_.id in visited,
-                )
-            )
-
-        scored.sort(
-            key=lambda item: item[0],
-            reverse=True,
-        )
-
-        top = scored[:10]
-
-        if not top:
-
-            await call.message.answer(
-                "فایل منطبق پیدا نشد."
-            )
-
-            return
-
-        rows = []
-
-        for score, property_, was_visited in top:
-
-            visited_text = (
-                " ⚠️ بازدید شده"
-                if was_visited
-                else ""
-            )
-
-            rows.append([
-                (
-                    (
-                        f"{score}% | "
-                        f"{property_.code} | "
-                        f"{property_.area} | "
-                        f"{property_.sqm:g}م | "
-                        f"{money(property_.price)}"
-                        f"{visited_text}"
-                    ),
-                    f"property:view:{property_.id}",
-                )
-            ])
-
-        await call.message.answer(
-            f"🔎 <b>پیشنهاد فایل برای {client.name}</b>",
-            reply_markup=inline(rows),
-        )
-
-    await call.answer()
-
-
-# =========================================================
-# ACTIVITIES
-# =========================================================
-
-@dp.message(F.text == "📝 آخرین فعالیت‌ها")
-async def activities(
-    message: Message,
-):
-
-    async with SessionLocal() as session:
-
-        activities_ = list(
-            (
-                await session.execute(
-                    select(Activity)
-                    .order_by(
-                        Activity.created_at.desc()
-                    )
-                    .limit(30)
-                )
-            ).scalars().all()
-        )
-
-        if not activities_:
-
-            await message.answer(
-                "هنوز فعالیتی ثبت نشده.",
-                reply_markup=MAIN,
-            )
-
-            return
-
-        lines = [
-            "📝 <b>آخرین فعالیت‌ها</b>\n"
-        ]
-
-        for activity in activities_:
-
-            user = await session.get(
-                User,
-                activity.user_id,
-            )
-
-            lines.append(
-                f"• {activity.created_at.strftime('%Y-%m-%d %H:%M')}"
-                f" | {activity.activity_type}"
-                f" | {user.name if user else '?'}\n"
-                f"  {activity.note}"
-            )
-
-        await message.answer(
-            "\n".join(lines),
-            reply_markup=MAIN,
-        )
 
 
 # =========================================================
@@ -3877,282 +2994,511 @@ async def activities(
 
 @dp.message(F.text == "📞 پیگیری")
 async def followups(
-    message: Message,
+    message: Message
 ):
+
+    if not await access_required(message):
+        return
 
     async with SessionLocal() as session:
 
-        visits = list(
-            (
-                await session.execute(
-                    select(Visit)
-                    .where(
-                        Visit.followup_date != "",
-                        Visit.followup_date != "ندارد",
-                    )
-                    .order_by(
-                        Visit.visited_at.desc()
-                    )
-                    .limit(50)
-                )
-            ).scalars().all()
+        result = await session.execute(
+            select(Visit)
+            .where(
+                Visit.followup_date != ""
+            )
+            .order_by(
+                Visit.visited_at.desc()
+            )
+            .limit(50)
         )
 
-        if not visits:
+        visits = result.scalars().all()
 
-            await message.answer(
-                "📞 پیگیری ثبت‌شده‌ای نداریم.",
-                reply_markup=MAIN,
-            )
-
-            return
-
-        lines = [
-            "📞 <b>پیگیری‌های ثبت‌شده</b>\n"
-        ]
-
-        for visit in visits:
-
-            client = await session.get(
-                Client,
-                visit.client_id,
-            )
-
-            property_ = await session.get(
-                Property,
-                visit.property_id,
-            )
-
-            lines.append(
-                f"• {visit.followup_date}"
-                f" | {client.name if client else '?'}"
-                f" | {property_.code if property_ else '?'}"
-                f" | {visit.next_action}"
-            )
-
+    if not visits:
         await message.answer(
-            "\n".join(lines),
-            reply_markup=MAIN,
+            "📭 پیگیری فعالی ثبت نشده."
+        )
+        return
+
+    lines = ["📞 پیگیری‌ها:\n"]
+
+    for v in visits:
+
+        async with SessionLocal() as session:
+
+            client_result = await session.execute(
+                select(Client).where(
+                    Client.id == v.client_id
+                )
+            )
+
+            client = client_result.scalar_one_or_none()
+
+            if not client:
+                continue
+
+            # خرید کرده = دیگر در پیگیری نمایش داده نشود
+            if client.status == "خرید کرده":
+                continue
+
+            prop_result = await session.execute(
+                select(Property).where(
+                    Property.id == v.property_id
+                )
+            )
+
+            prop = prop_result.scalar_one_or_none()
+
+        if not prop:
+            continue
+
+        lines.append(
+            f"👤 {client.name}\n"
+            f"🏠 فایل: {prop.code}\n"
+            f"📅 پیگیری: {v.followup_date}\n"
+            f"➡️ اقدام: {v.next_action}\n"
         )
 
+    if len(lines) == 1:
+        await message.answer(
+            "📭 پیگیری فعالی وجود ندارد."
+        )
+        return
+
+    await message.answer(
+        "\n".join(lines)
+    )
+
 
 # =========================================================
-# KPI
+# SMART MATCHING
 # =========================================================
 
-async def user_kpi(
-    session,
-    user,
+@dp.message(F.text == "🔎 پیشنهاد فایل")
+async def matching(
+    message: Message
 ):
 
-    files_count = int(
-        (
-            await session.execute(
-                select(
-                    func.count(Property.id)
-                ).where(
-                    Property.created_by ==
-                    user.telegram_id
-                )
+    if not await access_required(message):
+        return
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Client)
+            .where(
+                Client.status == "فعال"
             )
-        ).scalar()
-        or 0
-    )
-
-    clients_count = int(
-        (
-            await session.execute(
-                select(
-                    func.count(Client.id)
-                ).where(
-                    Client.created_by ==
-                    user.telegram_id
-                )
+            .order_by(
+                Client.created_at.desc()
             )
-        ).scalar()
-        or 0
+        )
+
+        clients = result.scalars().all()
+
+    if not clients:
+        await message.answer(
+            "مشتری فعالی وجود ندارد."
+        )
+        return
+
+    await message.answer(
+        "👤 مشتری را انتخاب کن:",
+        reply_markup=one_column([
+            f"{c.name} | {c.id}"
+            for c in clients
+        ])
     )
 
-    visits_count = int(
-        (
-            await session.execute(
-                select(
-                    func.count(Visit.id)
-                ).where(
-                    Visit.agent_id ==
-                    user.id
-                )
+
+@dp.message(F.text.regexp(r"^.*\|\s*\d+$"))
+async def matching_client_selected(
+    message: Message
+):
+
+    if not await access_required(message):
+        return
+
+    try:
+        client_id = int(
+            message.text.split("|")[-1].strip()
+        )
+    except Exception:
+        return
+
+    async with SessionLocal() as session:
+
+        client_result = await session.execute(
+            select(Client).where(
+                Client.id == client_id
             )
-        ).scalar()
-        or 0
-    )
+        )
 
-    followups_count = int(
-        (
-            await session.execute(
-                select(
-                    func.count(Activity.id)
-                ).where(
-                    Activity.user_id ==
-                    user.id,
-                    Activity.activity_type.in_([
-                        "کارنامه بازدید",
-                        "پیگیری",
-                    ])
-                )
+        client = client_result.scalar_one_or_none()
+
+        if not client:
+            return
+
+        prop_result = await session.execute(
+            select(Property).where(
+                Property.status.in_([
+                    "🟢 فعال",
+                    "🟡 در مذاکره",
+                    "فعال",
+                    "در مذاکره"
+                ])
             )
-        ).scalar()
-        or 0
-    )
+        )
 
-    negotiations = int(
-        (
-            await session.execute(
-                select(
-                    func.count(Activity.id)
-                ).where(
-                    Activity.user_id ==
-                    user.id,
-                    Activity.activity_type.in_([
-                        "🤝 مذاکره",
-                        "مذاکره",
-                    ])
-                )
+        properties = prop_result.scalars().all()
+
+        visited_result = await session.execute(
+            select(Visit.property_id).where(
+                Visit.client_id == client.id
             )
-        ).scalar()
-        or 0
-    )
+        )
 
-    contracts = int(
-        (
-            await session.execute(
-                select(
-                    func.count(Activity.id)
-                ).where(
-                    Activity.user_id ==
-                    user.id,
-                    Activity.activity_type.in_([
-                        "📄 قرارداد",
-                        "قرارداد",
-                        "معامله",
-                    ])
-                )
+        visited_ids = {
+            x for x in visited_result.scalars().all()
+        }
+
+    scored = []
+
+    for p in properties:
+
+        score = 0
+
+        # بودجه = 40%
+        if client.max_budget > 0:
+
+            if p.price <= client.max_budget:
+
+                if (
+                    client.min_budget <= 0
+                    or p.price >= client.min_budget
+                ):
+                    score += 40
+
+                else:
+                    score += 30
+
+            else:
+
+                difference = (
+                    p.price - client.max_budget
+                ) / client.max_budget
+
+                if difference <= 0.10:
+                    score += 20
+
+        # منطقه = 25%
+        if client.area == p.area:
+            score += 25
+
+        # متراژ = 20%
+        if client.max_sqm > 0:
+
+            if (
+                client.min_sqm <= p.sqm
+                <= client.max_sqm
+            ):
+                score += 20
+
+            elif (
+                abs(p.sqm - client.max_sqm)
+                / client.max_sqm <= 0.10
+            ):
+                score += 10
+
+        # نوع ملک = 15%
+        if (
+            client.property_type == p.property_type
+            or client.property_type == "سایر"
+        ):
+            score += 15
+
+        scored.append(
+            (
+                score,
+                p,
+                p.id in visited_ids
             )
-        ).scalar()
-        or 0
+        )
+
+    scored.sort(
+        key=lambda x: x[0],
+        reverse=True
     )
 
-    return (
-        files_count,
-        clients_count,
-        visits_count,
-        followups_count,
-        negotiations,
-        contracts,
+    top = scored[:10]
+
+    if not top:
+        await message.answer(
+            "فایل مناسبی پیدا نشد."
+        )
+        return
+
+    lines = [
+        f"🔎 پیشنهاد فایل برای {client.name}\n"
+    ]
+
+    for score, p, visited in top:
+
+        visited_text = (
+            " | 👀 قبلاً دیده شده"
+            if visited
+            else ""
+        )
+
+        lines.append(
+            f"🏠 {p.code}\n"
+            f"📍 {p.area}\n"
+            f"📐 {money(p.sqm)} متر\n"
+            f"💰 {money(p.price)}\n"
+            f"🏢 {p.property_type}\n"
+            f"🎯 تطابق: {score}%"
+            f"{visited_text}\n"
+        )
+
+    await message.answer(
+        "\n".join(lines)
     )
 
+
+# =========================================================
+# MY KPI
+# =========================================================
 
 @dp.message(F.text == "📊 KPI من")
 async def my_kpi(
-    message: Message,
+    message: Message
 ):
+
+    if not await access_required(message):
+        return
 
     async with SessionLocal() as session:
 
-        user = await get_user(
-            session,
-            message.from_user,
+        user_result = await session.execute(
+            select(User).where(
+                User.telegram_id ==
+                message.from_user.id
+            )
         )
 
-        (
-            files_count,
-            clients_count,
-            visits_count,
-            followups_count,
-            negotiations,
-            contracts,
-        ) = await user_kpi(
-            session,
-            user,
+        user = user_result.scalar_one_or_none()
+
+        if not user:
+            return
+
+        activity_count = await session.scalar(
+            select(func.count(Activity.id))
+            .where(
+                Activity.user_id == user.id
+            )
         )
 
-        await message.answer(
-            f"""
-📊 <b>KPI {user.name}</b>
-
-🏠 فایل: {files_count}
-👤 مشتری: {clients_count}
-👀 بازدید: {visits_count}
-📞 پیگیری / کارنامه: {followups_count}
-🤝 مذاکره: {negotiations}
-📄 قرارداد / معامله: {contracts}
-""",
-            reply_markup=MAIN,
+        visits_count = await session.scalar(
+            select(func.count(Visit.id))
+            .where(
+                Visit.agent_id ==
+                message.from_user.id
+            )
         )
 
+        property_count = await session.scalar(
+            select(func.count(Property.id))
+            .where(
+                Property.created_by ==
+                message.from_user.id
+            )
+        )
+
+        client_count = await session.scalar(
+            select(func.count(Client.id))
+            .where(
+                Client.created_by ==
+                message.from_user.id
+            )
+        )
+
+    await message.answer(
+        "📊 **KPI من**\n\n"
+        f"🏠 فایل ثبت‌شده: {property_count or 0}\n"
+        f"👤 مشتری ثبت‌شده: {client_count or 0}\n"
+        f"👀 بازدید: {visits_count or 0}\n"
+        f"📝 فعالیت: {activity_count or 0}",
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# TEAM KPI — ADMIN ONLY
+# =========================================================
 
 @dp.message(F.text == "👥 KPI تیم")
 async def team_kpi(
-    message: Message,
+    message: Message
 ):
+
+    if not await access_required(message):
+        return
+
+    if not is_admin(message.from_user.id):
+        await message.answer(
+            "⛔ این بخش فقط برای مدیر سیستم است."
+        )
+        return
 
     async with SessionLocal() as session:
 
-        users = list(
-            (
-                await session.execute(
-                    select(User)
-                    .order_by(
-                        User.name
-                    )
-                )
-            ).scalars().all()
+        result = await session.execute(
+            select(User)
+            .order_by(User.created_at)
         )
 
+        users = result.scalars().all()
+
         lines = [
-            "👥 <b>KPI تیم</b>\n"
+            "👥 **KPI تیم**\n"
         ]
 
         for user in users:
 
-            (
-                files_count,
-                clients_count,
-                visits_count,
-                followups_count,
-                negotiations,
-                contracts,
-            ) = await user_kpi(
-                session,
-                user,
+            activities = await session.scalar(
+                select(func.count(Activity.id))
+                .where(
+                    Activity.user_id == user.id
+                )
+            )
+
+            visits = await session.scalar(
+                select(func.count(Visit.id))
+                .where(
+                    Visit.agent_id ==
+                    user.telegram_id
+                )
+            )
+
+            files = await session.scalar(
+                select(func.count(Property.id))
+                .where(
+                    Property.created_by ==
+                    user.telegram_id
+                )
+            )
+
+            clients = await session.scalar(
+                select(func.count(Client.id))
+                .where(
+                    Client.created_by ==
+                    user.telegram_id
+                )
             )
 
             lines.append(
-                f"""
-👤 {user.name}
-
-🏠 {files_count} فایل
-👤 {clients_count} مشتری
-👀 {visits_count} بازدید
-📞 {followups_count} پیگیری
-🤝 {negotiations} مذاکره
-📄 {contracts} قرارداد/معامله
-"""
+                f"👤 {user.name}\n"
+                f"🏠 فایل: {files or 0}\n"
+                f"👤 مشتری: {clients or 0}\n"
+                f"👀 بازدید: {visits or 0}\n"
+                f"📝 فعالیت: {activities or 0}\n"
             )
 
-        await message.answer(
-            "\n".join(lines),
-            reply_markup=MAIN,
-        )
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="Markdown"
+    )
 
 
 # =========================================================
-# RUN
+# LAST ACTIVITIES — ADMIN ONLY
+# =========================================================
+
+@dp.message(F.text == "📝 آخرین فعالیت‌ها")
+async def latest_activities(
+    message: Message
+):
+
+    if not await access_required(message):
+        return
+
+    if not is_admin(message.from_user.id):
+        await message.answer(
+            "⛔ این بخش فقط برای مدیر سیستم است."
+        )
+        return
+
+    async with SessionLocal() as session:
+
+        result = await session.execute(
+            select(Activity)
+            .order_by(
+                Activity.created_at.desc()
+            )
+            .limit(50)
+        )
+
+        activities = result.scalars().all()
+
+    if not activities:
+        await message.answer(
+            "📭 فعالیتی ثبت نشده."
+        )
+        return
+
+    lines = [
+        "📝 **آخرین فعالیت‌ها**\n"
+    ]
+
+    for a in activities:
+
+        lines.append(
+            f"• {a.created_at.strftime('%Y-%m-%d %H:%M')}\n"
+            f"👤 User ID: {a.user_id}\n"
+            f"⚙️ {a.activity_type}\n"
+            f"📝 {a.note}\n"
+        )
+
+    await message.answer(
+        "\n".join(lines),
+        parse_mode="Markdown"
+    )
+
+
+# =========================================================
+# CALLBACK ACCESS GUARD
+# =========================================================
+
+@dp.callback_query()
+async def unknown_callback(
+    callback: CallbackQuery
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    await callback.answer()
+
+
+# =========================================================
+# ERROR HANDLER
+# =========================================================
+
+@dp.errors()
+async def errors_handler(event):
+    print("BOT ERROR:", event.exception)
+
+
+# =========================================================
+# MAIN
 # =========================================================
 
 async def main():
 
     await migrate()
+
+    print("🏙️ Hooman Real Estate CRM started.")
 
     await dp.start_polling(
         bot
