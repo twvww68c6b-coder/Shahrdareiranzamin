@@ -26,6 +26,7 @@ from sqlalchemy import (
     select,
     func,
     inspect,
+    or_,
 )
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -651,6 +652,11 @@ class EventForm(StatesGroup):
     property_id = State()
     event_type = State()
     note = State()
+
+
+class SearchForm(StatesGroup):
+    entity = State()
+    query = State()
 
 
 class StatusForm(StatesGroup):
@@ -1979,7 +1985,14 @@ async def send_property_page(
 
         properties = result.scalars().all()
 
-    buttons = []
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🔎 جستجوی فایل",
+                callback_data="psearch:start"
+            )
+        ]
+    ]
 
     for p in properties:
         buttons.append([
@@ -2045,6 +2058,285 @@ async def property_page_callback(
         page
     )
 
+    await callback.answer()
+
+
+# =========================================================
+# PROPERTY SEARCH
+# =========================================================
+
+async def send_property_search_page(target, query: str, page: int = 1):
+    query = (query or "").strip()
+
+    if not query:
+        await send_property_page(target, 1)
+        return
+
+    pattern = f"%{query}%"
+
+    async with SessionLocal() as session:
+        where_clause = [
+            active_property_filter(),
+            or_(
+                Property.code.ilike(pattern),
+                Property.area.ilike(pattern),
+                Property.address.ilike(pattern),
+                Property.owner_name.ilike(pattern),
+                Property.owner_phone.ilike(pattern),
+                Property.property_type.ilike(pattern),
+                Property.description.ilike(pattern),
+            )
+        ]
+
+        total = await session.scalar(
+            select(func.count(Property.id)).where(*where_clause)
+        )
+        total = total or 0
+
+        if total == 0:
+            await target.answer(
+                f"🔎 برای «{query}» فایل فعالی پیدا نشد.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔎 جستجوی دوباره", callback_data="psearch:start")],
+                    [InlineKeyboardButton(text="📂 همه فایل‌ها", callback_data="plist:1")],
+                ])
+            )
+            return
+
+        total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * PAGE_SIZE
+
+        result = await session.execute(
+            select(Property)
+            .where(*where_clause)
+            .order_by(Property.created_at.desc())
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+        properties = result.scalars().all()
+
+    buttons = [
+        [InlineKeyboardButton(text="🔎 تغییر جستجو", callback_data="psearch:start")]
+    ]
+
+    for prop in properties:
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🏠 {prop.code} | {prop.area} | {money(prop.sqm)}م",
+                callback_data=f"popen:{prop.id}"
+            )
+        ])
+
+    nav = pagination_keyboard("psearchpage", page, total_pages).inline_keyboard[0]
+    buttons.append(nav)
+    buttons.append([
+        InlineKeyboardButton(text="📂 همه فایل‌ها", callback_data="plist:1")
+    ])
+
+    await target.answer(
+        f"🔎 **نتیجه جستجوی فایل**\n"
+        f"عبارت: `{query}`\n"
+        f"صفحه {page} از {total_pages} — {total} فایل",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="Markdown"
+    )
+
+
+@dp.callback_query(F.data == "psearch:start")
+async def property_search_start(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+
+    await state.clear()
+    await state.update_data(entity="property")
+    await state.set_state(SearchForm.query)
+
+    await callback.message.answer(
+        "🔎 **جستجوی فایل**\n\n"
+        "کد، منطقه، آدرس، نام مالک، شماره مالک، نوع ملک یا توضیحات را وارد کن:",
+        reply_markup=keyboard([["❌ لغو"]], include_cancel=False),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@dp.message(SearchForm.query)
+async def search_query(message: Message, state: FSMContext):
+    data = await state.get_data()
+    entity = data.get("entity")
+    query = (message.text or "").strip()
+
+    if entity not in {"property", "client"}:
+        return
+
+    if not query:
+        await message.answer("عبارت جستجو را وارد کن:")
+        return
+
+    await state.clear()
+
+    if entity == "property":
+        await state.update_data(property_search_query=query)
+        await send_property_search_page(message, query, 1)
+    else:
+        await state.update_data(client_search_query=query)
+        await send_client_search_page(message, query, 1)
+
+
+@dp.callback_query(F.data.startswith("psearchpage:"))
+async def property_search_page_callback(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer("صفحه نامعتبر است.", show_alert=True)
+        return
+
+    # Query is stored per-user only while a search flow is active. If absent,
+    # ask for a fresh search instead of showing an unrelated result.
+    data = await state.get_data()
+    query = data.get("property_search_query")
+    if not query:
+        await callback.answer("جستجو منقضی شده؛ دوباره جستجو کن.", show_alert=True)
+        await callback.message.answer(
+            "🔎 برای جستجوی فایل روی «جستجوی فایل» بزن.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔎 جستجوی فایل", callback_data="psearch:start")]
+            ])
+        )
+        return
+
+    await send_property_search_page(callback.message, query, page)
+    await callback.answer()
+
+
+# =========================================================
+# CLIENT SEARCH
+# =========================================================
+
+async def send_client_search_page(target, query: str, page: int = 1):
+    query = (query or "").strip()
+
+    if not query:
+        await send_client_page(target, 1)
+        return
+
+    pattern = f"%{query}%"
+
+    async with SessionLocal() as session:
+        where_clause = [
+            active_client_filter(),
+            or_(
+                Client.name.ilike(pattern),
+                Client.phone.ilike(pattern),
+                Client.area.ilike(pattern),
+                Client.property_type.ilike(pattern),
+                Client.description.ilike(pattern),
+            )
+        ]
+
+        total = await session.scalar(
+            select(func.count(Client.id)).where(*where_clause)
+        )
+        total = total or 0
+
+        if total == 0:
+            await target.answer(
+                f"🔎 برای «{query}» مشتری فعالی پیدا نشد.",
+                reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                    [InlineKeyboardButton(text="🔎 جستجوی دوباره", callback_data="csearch:start")],
+                    [InlineKeyboardButton(text="👤 همه مشتری‌ها", callback_data="clist:1")],
+                ])
+            )
+            return
+
+        total_pages = (total + PAGE_SIZE - 1) // PAGE_SIZE
+        page = max(1, min(page, total_pages))
+        offset = (page - 1) * PAGE_SIZE
+
+        result = await session.execute(
+            select(Client)
+            .where(*where_clause)
+            .order_by(Client.created_at.desc())
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+        clients = result.scalars().all()
+
+    buttons = [
+        [InlineKeyboardButton(text="🔎 تغییر جستجو", callback_data="csearch:start")]
+    ]
+
+    for client in clients:
+        budget = f"{money(client.min_budget)} تا {money(client.max_budget)}"
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"👤 {client.name} | 💰 {budget}",
+                callback_data=f"copen:{client.id}"
+            )
+        ])
+
+    buttons.append(
+        pagination_keyboard("csearchpage", page, total_pages).inline_keyboard[0]
+    )
+    buttons.append([
+        InlineKeyboardButton(text="👤 همه مشتری‌ها", callback_data="clist:1")
+    ])
+
+    await target.answer(
+        f"🔎 **نتیجه جستجوی مشتری**\n"
+        f"عبارت: `{query}`\n"
+        f"صفحه {page} از {total_pages} — {total} مشتری",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="Markdown"
+    )
+
+
+@dp.callback_query(F.data == "csearch:start")
+async def client_search_start(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+
+    await state.clear()
+    await state.update_data(entity="client")
+    await state.set_state(SearchForm.query)
+
+    await callback.message.answer(
+        "🔎 **جستجوی مشتری**\n\n"
+        "نام، شماره، منطقه، نوع ملک یا توضیحات را وارد کن:",
+        reply_markup=keyboard([["❌ لغو"]], include_cancel=False),
+        parse_mode="Markdown"
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("csearchpage:"))
+async def client_search_page_callback(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+
+    try:
+        page = int(callback.data.split(":", 1)[1])
+    except Exception:
+        await callback.answer("صفحه نامعتبر است.", show_alert=True)
+        return
+
+    data = await state.get_data()
+    query = data.get("client_search_query")
+    if not query:
+        await callback.answer("جستجو منقضی شده؛ دوباره جستجو کن.", show_alert=True)
+        await callback.message.answer(
+            "🔎 برای جستجوی مشتری روی «جستجوی مشتری» بزن.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔎 جستجوی مشتری", callback_data="csearch:start")]
+            ])
+        )
+        return
+
+    await send_client_search_page(callback.message, query, page)
     await callback.answer()
 
 
@@ -3717,7 +4009,14 @@ async def send_client_page(
 
         clients = result.scalars().all()
 
-    buttons = []
+    buttons = [
+        [
+            InlineKeyboardButton(
+                text="🔎 جستجوی مشتری",
+                callback_data="csearch:start"
+            )
+        ]
+    ]
 
     for c in clients:
 
