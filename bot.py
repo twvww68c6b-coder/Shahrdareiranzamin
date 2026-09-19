@@ -1,4 +1,5 @@
 import os
+import shutil
 import asyncio
 from datetime import datetime
 
@@ -25,6 +26,7 @@ from sqlalchemy import (
     select,
     func,
     inspect,
+    or_,
 )
 from sqlalchemy.ext.asyncio import (
     create_async_engine,
@@ -66,10 +68,17 @@ ALLOWED_TELEGRAM_IDS = {
     if x.strip()
 }
 
+BACKUP_DIR = os.getenv(
+    "BACKUP_DIR",
+    "backups"
+)
+
 
 # =========================================================
 # DATABASE URL
 # =========================================================
+
+_ORIGINAL_DATABASE_URL = DATABASE_URL
 
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace(
@@ -199,6 +208,11 @@ class Property(Base):
     units_per_floor: Mapped[int] = mapped_column(
         Integer,
         default=1
+    )
+
+    year_built: Mapped[int] = mapped_column(
+        Integer,
+        default=0
     )
 
     elevator: Mapped[str] = mapped_column(
@@ -332,6 +346,16 @@ class Client(Base):
     property_type: Mapped[str] = mapped_column(
         String(100),
         default=""
+    )
+
+    min_year_built: Mapped[int] = mapped_column(
+        Integer,
+        default=0
+    )
+
+    max_year_built: Mapped[int] = mapped_column(
+        Integer,
+        default=0
     )
 
     # Kept for old database compatibility.
@@ -490,6 +514,8 @@ PROPERTY_TYPES = [
     "سایر",
 ]
 
+ALL_PROPERTY_TYPES = "همه انواع"
+
 STATUSES = [
     "🟢 فعال",
     "🟡 در مذاکره",
@@ -498,6 +524,8 @@ STATUSES = [
     "🔴 منصرف شد",
     "⚫ غیرفعال",
 ]
+
+ALL_STATUSES = "همه وضعیت‌ها"
 
 ACTIVE_PROPERTY_STATUSES = [
     "🟢 فعال",
@@ -562,6 +590,7 @@ class PropertyForm(StatesGroup):
     sqm = State()
     price = State()
     property_type = State()
+    year_built = State()
     bedrooms = State()
     floors = State()
     unit_floor = State()
@@ -590,6 +619,8 @@ class ClientForm(StatesGroup):
     min_budget = State()
     max_budget = State()
     property_type = State()
+    min_year_built = State()
+    max_year_built = State()
     description = State()
 
 
@@ -625,6 +656,26 @@ class StatusForm(StatesGroup):
 
 class ClientStatusForm(StatesGroup):
     client_id = State()
+    status = State()
+
+
+class PropertySearchForm(StatesGroup):
+    query = State()
+
+
+class ClientSearchForm(StatesGroup):
+    query = State()
+
+
+class PropertyFilterForm(StatesGroup):
+    area = State()
+    property_type = State()
+    status = State()
+
+
+class ClientFilterForm(StatesGroup):
+    area = State()
+    property_type = State()
     status = State()
 
 
@@ -771,6 +822,8 @@ def main_menu(user_id: int):
     rows = [
         ["🏠 فایل‌ها", "👤 مشتری‌ها"],
         ["➕ ثبت فایل", "➕ ثبت مشتری"],
+        ["🔍 جستجوی فایل", "🔍 جستجوی مشتری"],
+        ["🧰 فیلتر فایل", "🧰 فیلتر مشتری"],
         ["👀 ثبت بازدید", "📞 پیگیری"],
         ["🔎 پیشنهاد فایل", "📊 KPI من"],
     ]
@@ -885,10 +938,71 @@ async def add_activity(
 
 
 # =========================================================
+# DATABASE BACKUP
+# =========================================================
+
+def backup_database():
+    """
+    Creates a timestamped copy of the sqlite database file
+    before running any migration, so previous data can always
+    be restored. No-op for non-sqlite databases (e.g. Postgres),
+    since those should be backed up at the infrastructure level.
+    """
+
+    url = _ORIGINAL_DATABASE_URL
+
+    sqlite_prefixes = (
+        "sqlite:///",
+        "sqlite+aiosqlite:///",
+    )
+
+    db_path = None
+
+    for prefix in sqlite_prefixes:
+        if url.startswith(prefix):
+            db_path = url[len(prefix):]
+            break
+
+    if not db_path:
+        # Not a local sqlite file (e.g. Postgres) - nothing to copy.
+        return
+
+    if not os.path.exists(db_path):
+        # First run - no existing data to back up.
+        return
+
+    try:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+
+        timestamp = datetime.utcnow().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+
+        base_name = os.path.basename(db_path)
+
+        backup_path = os.path.join(
+            BACKUP_DIR,
+            f"{base_name}.{timestamp}.bak"
+        )
+
+        shutil.copy2(db_path, backup_path)
+
+        print(f"💾 Backup created: {backup_path}")
+
+    except Exception as exc:
+        # Never block startup because of a failed backup attempt,
+        # but always surface it loudly.
+        print(f"⚠️ Backup failed: {exc}")
+
+
+# =========================================================
 # DATABASE MIGRATION
 # =========================================================
 
 async def migrate():
+
+    # Always back up existing data before altering anything.
+    backup_database()
 
     async with engine.begin() as conn:
 
@@ -979,6 +1093,16 @@ async def migrate():
             )
         )
 
+        await conn.run_sync(
+            lambda sync_conn:
+            add_column_if_missing(
+                sync_conn,
+                "properties",
+                "year_built",
+                "INTEGER DEFAULT 0"
+            )
+        )
+
         # Clients
         await conn.run_sync(
             lambda sync_conn:
@@ -987,6 +1111,26 @@ async def migrate():
                 "clients",
                 "status",
                 "VARCHAR(50) DEFAULT 'فعال'"
+            )
+        )
+
+        await conn.run_sync(
+            lambda sync_conn:
+            add_column_if_missing(
+                sync_conn,
+                "clients",
+                "min_year_built",
+                "INTEGER DEFAULT 0"
+            )
+        )
+
+        await conn.run_sync(
+            lambda sync_conn:
+            add_column_if_missing(
+                sync_conn,
+                "clients",
+                "max_year_built",
+                "INTEGER DEFAULT 0"
             )
         )
 
@@ -1001,6 +1145,26 @@ async def migrate():
             Client.__table__.update()
             .where(Client.status.is_(None))
             .values(status="فعال")
+        )
+
+        # Backfill NULL year_built / min-max year fields introduced
+        # in this update, so existing rows keep working as "unset".
+        await conn.execute(
+            Property.__table__.update()
+            .where(Property.year_built.is_(None))
+            .values(year_built=0)
+        )
+
+        await conn.execute(
+            Client.__table__.update()
+            .where(Client.min_year_built.is_(None))
+            .values(min_year_built=0)
+        )
+
+        await conn.execute(
+            Client.__table__.update()
+            .where(Client.max_year_built.is_(None))
+            .values(max_year_built=0)
         )
 
 
@@ -1238,6 +1402,34 @@ async def property_type(
 
     await state.update_data(
         property_type=message.text
+    )
+
+    await state.set_state(
+        PropertyForm.year_built
+    )
+
+    await message.answer(
+        "🏗 سال ساخت ملک را وارد کن.\n"
+        "اگر نامشخص است ۰ بزن:"
+    )
+
+
+@dp.message(PropertyForm.year_built)
+async def property_year_built(
+    message: Message,
+    state: FSMContext
+):
+
+    value = number(message.text)
+
+    if value < 0:
+        await message.answer(
+            "سال ساخت معتبر وارد کن:"
+        )
+        return
+
+    await state.update_data(
+        year_built=int(value)
     )
 
     await state.set_state(
@@ -1725,6 +1917,7 @@ async def property_description(
         f"📐 متراژ: {money(data.get('sqm'))}\n"
         f"💰 قیمت: {money(data.get('price'))}\n"
         f"🏢 نوع: {data.get('property_type')}\n"
+        f"🏗 سال ساخت: {data.get('year_built')}\n"
         f"🛏 خواب: {data.get('bedrooms')}\n"
         f"🏢 طبقات: {data.get('floors')}\n"
         f"🏠 طبقه ملک: {data.get('unit_floor')}\n"
@@ -1791,6 +1984,10 @@ async def property_confirmation(
             sqm=data["sqm"],
             price=data["price"],
             property_type=data["property_type"],
+            year_built=data.get(
+                "year_built",
+                0
+            ),
             bedrooms=data["bedrooms"],
             floors=data["floors"],
             unit_floor=data["unit_floor"],
@@ -2013,6 +2210,474 @@ async def property_page_callback(
 
 
 # =========================================================
+# PROPERTY SEARCH
+# =========================================================
+
+async def send_property_search_page(
+    target,
+    query_text: str,
+    page: int
+):
+
+    like_pattern = f"%{query_text}%"
+
+    search_condition = or_(
+        Property.code.ilike(like_pattern),
+        Property.area.ilike(like_pattern),
+        Property.address.ilike(like_pattern),
+        Property.owner_name.ilike(like_pattern),
+        Property.owner_phone.ilike(like_pattern),
+        Property.description.ilike(like_pattern),
+    )
+
+    async with SessionLocal() as session:
+
+        total = await session.scalar(
+            select(func.count(Property.id))
+            .where(search_condition)
+        )
+
+        total = total or 0
+
+        if total == 0:
+            await target.answer(
+                "📭 هیچ فایلی با این عبارت پیدا نشد."
+            )
+            return
+
+        total_pages = (
+            total + PAGE_SIZE - 1
+        ) // PAGE_SIZE
+
+        page = max(
+            1,
+            min(page, total_pages)
+        )
+
+        offset = (
+            page - 1
+        ) * PAGE_SIZE
+
+        result = await session.execute(
+            select(Property)
+            .where(search_condition)
+            .order_by(
+                Property.created_at.desc()
+            )
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+
+        properties = result.scalars().all()
+
+    buttons = []
+
+    for p in properties:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🏠 {p.code} | "
+                    f"{p.area} | "
+                    f"{p.status}"
+                ),
+                callback_data=f"popen:{p.id}"
+            )
+        ])
+
+    buttons.append(
+        pagination_keyboard(
+            "psearch",
+            page,
+            total_pages
+        ).inline_keyboard[0]
+    )
+
+    await target.answer(
+        f"🔍 **نتایج جستجوی فایل: {query_text}**\n"
+        f"صفحه {page} از {total_pages} — "
+        f"{total} نتیجه",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=buttons
+        ),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text == "🔍 جستجوی فایل")
+async def property_search_start(
+    message: Message,
+    state: FSMContext
+):
+
+    if not await access_required(message):
+        return
+
+    await state.clear()
+
+    await state.set_state(
+        PropertySearchForm.query
+    )
+
+    await message.answer(
+        "🔍 بخشی از کد، منطقه، آدرس، نام مالک یا "
+        "شماره تماس را وارد کن:",
+        reply_markup=keyboard(
+            [],
+            include_cancel=True
+        )
+    )
+
+
+@dp.message(PropertySearchForm.query)
+async def property_search_query(
+    message: Message,
+    state: FSMContext
+):
+
+    query_text = message.text.strip()
+
+    if not query_text:
+        await message.answer(
+            "لطفاً یک عبارت برای جستجو وارد کن."
+        )
+        return
+
+    await state.update_data(
+        last_property_query=query_text
+    )
+
+    await state.set_state(None)
+
+    await message.answer(
+        "🔎 در حال جستجو...",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
+
+    await send_property_search_page(
+        message,
+        query_text,
+        1
+    )
+
+
+@dp.callback_query(F.data.startswith("psearch:"))
+async def property_search_page_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    data = await state.get_data()
+
+    query_text = data.get(
+        "last_property_query",
+        ""
+    )
+
+    if not query_text:
+        await callback.answer(
+            "جستجوی فعالی پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    page = int(
+        callback.data.split(":")[1]
+    )
+
+    await send_property_search_page(
+        callback.message,
+        query_text,
+        page
+    )
+
+    await callback.answer()
+
+
+# =========================================================
+# PROPERTY FILTER
+# =========================================================
+
+async def send_property_filter_page(
+    target,
+    filters: dict,
+    page: int
+):
+
+    conditions = []
+
+    area = filters.get("area")
+    property_type_value = filters.get("property_type")
+    status = filters.get("status")
+
+    if area and area != ALL_AREAS:
+        conditions.append(Property.area == area)
+
+    if (
+        property_type_value
+        and property_type_value != ALL_PROPERTY_TYPES
+    ):
+        conditions.append(
+            Property.property_type == property_type_value
+        )
+
+    if status and status != ALL_STATUSES:
+        conditions.append(Property.status == status)
+
+    async with SessionLocal() as session:
+
+        base_query = select(Property)
+        count_query = select(func.count(Property.id))
+
+        for condition in conditions:
+            base_query = base_query.where(condition)
+            count_query = count_query.where(condition)
+
+        total = await session.scalar(count_query)
+
+        total = total or 0
+
+        if total == 0:
+            await target.answer(
+                "📭 فایلی با این فیلتر پیدا نشد."
+            )
+            return
+
+        total_pages = (
+            total + PAGE_SIZE - 1
+        ) // PAGE_SIZE
+
+        page = max(
+            1,
+            min(page, total_pages)
+        )
+
+        offset = (
+            page - 1
+        ) * PAGE_SIZE
+
+        result = await session.execute(
+            base_query
+            .order_by(
+                Property.created_at.desc()
+            )
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+
+        properties = result.scalars().all()
+
+    buttons = []
+
+    for p in properties:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"🏠 {p.code} | "
+                    f"{p.area} | "
+                    f"{p.status}"
+                ),
+                callback_data=f"popen:{p.id}"
+            )
+        ])
+
+    buttons.append(
+        pagination_keyboard(
+            "pfilter",
+            page,
+            total_pages
+        ).inline_keyboard[0]
+    )
+
+    summary = " | ".join(
+        x for x in [
+            area,
+            property_type_value,
+            status,
+        ] if x
+    ) or "بدون فیلتر"
+
+    await target.answer(
+        f"🧰 **فیلتر فایل: {summary}**\n"
+        f"صفحه {page} از {total_pages} — "
+        f"{total} نتیجه",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=buttons
+        ),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text == "🧰 فیلتر فایل")
+async def property_filter_start(
+    message: Message,
+    state: FSMContext
+):
+
+    if not await access_required(message):
+        return
+
+    await state.clear()
+
+    await state.set_state(
+        PropertyFilterForm.area
+    )
+
+    await message.answer(
+        "📍 منطقه را انتخاب کن:",
+        reply_markup=one_column([
+            *AREAS,
+            ALL_AREAS
+        ])
+    )
+
+
+@dp.message(PropertyFilterForm.area)
+async def property_filter_area(
+    message: Message,
+    state: FSMContext
+):
+
+    valid = [*AREAS, ALL_AREAS]
+
+    if message.text not in valid:
+        await message.answer(
+            "لطفاً یکی از مناطق یا «همه مناطق» را انتخاب کن."
+        )
+        return
+
+    await state.update_data(
+        filter_area=message.text
+    )
+
+    await state.set_state(
+        PropertyFilterForm.property_type
+    )
+
+    await message.answer(
+        "🏢 نوع ملک را انتخاب کن:",
+        reply_markup=one_column([
+            *PROPERTY_TYPES,
+            ALL_PROPERTY_TYPES
+        ])
+    )
+
+
+@dp.message(PropertyFilterForm.property_type)
+async def property_filter_type(
+    message: Message,
+    state: FSMContext
+):
+
+    valid = [*PROPERTY_TYPES, ALL_PROPERTY_TYPES]
+
+    if message.text not in valid:
+        await message.answer(
+            "لطفاً یکی از انواع یا «همه انواع» را انتخاب کن."
+        )
+        return
+
+    await state.update_data(
+        filter_property_type=message.text
+    )
+
+    await state.set_state(
+        PropertyFilterForm.status
+    )
+
+    await message.answer(
+        "📊 وضعیت را انتخاب کن:",
+        reply_markup=one_column([
+            *STATUSES,
+            ALL_STATUSES
+        ])
+    )
+
+
+@dp.message(PropertyFilterForm.status)
+async def property_filter_status(
+    message: Message,
+    state: FSMContext
+):
+
+    valid = [*STATUSES, ALL_STATUSES]
+
+    if message.text not in valid:
+        await message.answer(
+            "لطفاً یکی از وضعیت‌ها یا «همه وضعیت‌ها» را انتخاب کن."
+        )
+        return
+
+    data = await state.get_data()
+
+    filters = {
+        "area": data.get("filter_area"),
+        "property_type": data.get(
+            "filter_property_type"
+        ),
+        "status": message.text,
+    }
+
+    await state.update_data(
+        last_property_filter=filters
+    )
+
+    await state.set_state(None)
+
+    await message.answer(
+        "✅ فیلتر اعمال شد.",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
+
+    await send_property_filter_page(
+        message,
+        filters,
+        1
+    )
+
+
+@dp.callback_query(F.data.startswith("pfilter:"))
+async def property_filter_page_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    data = await state.get_data()
+
+    filters = data.get(
+        "last_property_filter"
+    )
+
+    if not filters:
+        await callback.answer(
+            "فیلتر فعالی پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    page = int(
+        callback.data.split(":")[1]
+    )
+
+    await send_property_filter_page(
+        callback.message,
+        filters,
+        page
+    )
+
+    await callback.answer()
+
+
+# =========================================================
 # PROPERTY DETAIL
 # =========================================================
 
@@ -2060,6 +2725,7 @@ async def send_property_detail(
             f"📐 متراژ: {money(prop.sqm)}\n"
             f"💰 قیمت: {money(prop.price)}\n"
             f"🏢 نوع: {prop.property_type}\n"
+            f"🏗 سال ساخت: {prop.year_built}\n"
             f"🛏 خواب: {prop.bedrooms}\n"
             f"🏢 کل طبقات: {prop.floors}\n"
             f"🏠 طبقه ملک: {prop.unit_floor}\n"
@@ -2190,6 +2856,7 @@ EDIT_FIELDS = {
     "sqm": "📐 متراژ",
     "price": "💰 قیمت",
     "property_type": "🏢 نوع ملک",
+    "year_built": "🏗 سال ساخت",
     "bedrooms": "🛏 خواب",
     "floors": "🏢 کل طبقات",
     "unit_floor": "🏠 طبقه ملک",
@@ -2411,6 +3078,7 @@ async def property_edit_value(
     numeric_fields = {
         "sqm",
         "price",
+        "year_built",
         "bedrooms",
         "floors",
         "unit_floor",
@@ -2430,6 +3098,7 @@ async def property_edit_value(
             return
 
         if field in {
+            "year_built",
             "bedrooms",
             "floors",
             "unit_floor",
@@ -3161,6 +3830,62 @@ async def client_property_type(
     )
 
     await state.set_state(
+        ClientForm.min_year_built
+    )
+
+    await message.answer(
+        "🏗 حداقل سال ساخت مورد نظر.\n"
+        "اگر مهم نیست ۰ بزن:"
+    )
+
+
+@dp.message(ClientForm.min_year_built)
+async def client_min_year_built(
+    message: Message,
+    state: FSMContext
+):
+
+    value = number(message.text)
+
+    if value < 0:
+        await message.answer(
+            "مقدار معتبر وارد کن:"
+        )
+        return
+
+    await state.update_data(
+        min_year_built=int(value)
+    )
+
+    await state.set_state(
+        ClientForm.max_year_built
+    )
+
+    await message.answer(
+        "🏗 حداکثر سال ساخت مورد نظر.\n"
+        "اگر مهم نیست ۰ بزن:"
+    )
+
+
+@dp.message(ClientForm.max_year_built)
+async def client_max_year_built(
+    message: Message,
+    state: FSMContext
+):
+
+    value = number(message.text)
+
+    if value < 0:
+        await message.answer(
+            "مقدار معتبر وارد کن:"
+        )
+        return
+
+    await state.update_data(
+        max_year_built=int(value)
+    )
+
+    await state.set_state(
         ClientForm.description
     )
 
@@ -3188,6 +3913,14 @@ async def client_save(
             min_budget=data["min_budget"],
             max_budget=data["max_budget"],
             property_type=data["property_type"],
+            min_year_built=data.get(
+                "min_year_built",
+                0
+            ),
+            max_year_built=data.get(
+                "max_year_built",
+                0
+            ),
             bedrooms=0,
             description=message.text,
             status="فعال",
@@ -3347,6 +4080,470 @@ async def client_page_callback(
 
 
 # =========================================================
+# CLIENT SEARCH
+# =========================================================
+
+async def send_client_search_page(
+    target,
+    query_text: str,
+    page: int
+):
+
+    like_pattern = f"%{query_text}%"
+
+    search_condition = or_(
+        Client.name.ilike(like_pattern),
+        Client.phone.ilike(like_pattern),
+        Client.area.ilike(like_pattern),
+        Client.description.ilike(like_pattern),
+    )
+
+    async with SessionLocal() as session:
+
+        total = await session.scalar(
+            select(func.count(Client.id))
+            .where(search_condition)
+        )
+
+        total = total or 0
+
+        if total == 0:
+            await target.answer(
+                "📭 هیچ مشتری‌ای با این عبارت پیدا نشد."
+            )
+            return
+
+        total_pages = (
+            total + PAGE_SIZE - 1
+        ) // PAGE_SIZE
+
+        page = max(
+            1,
+            min(page, total_pages)
+        )
+
+        offset = (
+            page - 1
+        ) * PAGE_SIZE
+
+        result = await session.execute(
+            select(Client)
+            .where(search_condition)
+            .order_by(
+                Client.created_at.desc()
+            )
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+
+        clients = result.scalars().all()
+
+    buttons = []
+
+    for c in clients:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"👤 {c.name} | "
+                    f"{c.status}"
+                ),
+                callback_data=f"copen:{c.id}"
+            )
+        ])
+
+    buttons.append(
+        pagination_keyboard(
+            "csearch",
+            page,
+            total_pages
+        ).inline_keyboard[0]
+    )
+
+    await target.answer(
+        f"🔍 **نتایج جستجوی مشتری: {query_text}**\n"
+        f"صفحه {page} از {total_pages} — "
+        f"{total} نتیجه",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=buttons
+        ),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text == "🔍 جستجوی مشتری")
+async def client_search_start(
+    message: Message,
+    state: FSMContext
+):
+
+    if not await access_required(message):
+        return
+
+    await state.clear()
+
+    await state.set_state(
+        ClientSearchForm.query
+    )
+
+    await message.answer(
+        "🔍 بخشی از نام، شماره تماس یا منطقه "
+        "مشتری را وارد کن:",
+        reply_markup=keyboard(
+            [],
+            include_cancel=True
+        )
+    )
+
+
+@dp.message(ClientSearchForm.query)
+async def client_search_query(
+    message: Message,
+    state: FSMContext
+):
+
+    query_text = message.text.strip()
+
+    if not query_text:
+        await message.answer(
+            "لطفاً یک عبارت برای جستجو وارد کن."
+        )
+        return
+
+    await state.update_data(
+        last_client_query=query_text
+    )
+
+    await state.set_state(None)
+
+    await message.answer(
+        "🔎 در حال جستجو...",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
+
+    await send_client_search_page(
+        message,
+        query_text,
+        1
+    )
+
+
+@dp.callback_query(F.data.startswith("csearch:"))
+async def client_search_page_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    data = await state.get_data()
+
+    query_text = data.get(
+        "last_client_query",
+        ""
+    )
+
+    if not query_text:
+        await callback.answer(
+            "جستجوی فعالی پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    page = int(
+        callback.data.split(":")[1]
+    )
+
+    await send_client_search_page(
+        callback.message,
+        query_text,
+        page
+    )
+
+    await callback.answer()
+
+
+# =========================================================
+# CLIENT FILTER
+# =========================================================
+
+async def send_client_filter_page(
+    target,
+    filters: dict,
+    page: int
+):
+
+    conditions = []
+
+    area = filters.get("area")
+    property_type_value = filters.get("property_type")
+    status = filters.get("status")
+
+    if area and area != ALL_AREAS:
+        conditions.append(Client.area == area)
+
+    if (
+        property_type_value
+        and property_type_value != ALL_PROPERTY_TYPES
+    ):
+        conditions.append(
+            Client.property_type == property_type_value
+        )
+
+    if status and status != ALL_STATUSES:
+        conditions.append(Client.status == status)
+
+    async with SessionLocal() as session:
+
+        base_query = select(Client)
+        count_query = select(func.count(Client.id))
+
+        for condition in conditions:
+            base_query = base_query.where(condition)
+            count_query = count_query.where(condition)
+
+        total = await session.scalar(count_query)
+
+        total = total or 0
+
+        if total == 0:
+            await target.answer(
+                "📭 مشتری‌ای با این فیلتر پیدا نشد."
+            )
+            return
+
+        total_pages = (
+            total + PAGE_SIZE - 1
+        ) // PAGE_SIZE
+
+        page = max(
+            1,
+            min(page, total_pages)
+        )
+
+        offset = (
+            page - 1
+        ) * PAGE_SIZE
+
+        result = await session.execute(
+            base_query
+            .order_by(
+                Client.created_at.desc()
+            )
+            .offset(offset)
+            .limit(PAGE_SIZE)
+        )
+
+        clients = result.scalars().all()
+
+    buttons = []
+
+    for c in clients:
+        buttons.append([
+            InlineKeyboardButton(
+                text=(
+                    f"👤 {c.name} | "
+                    f"{c.status}"
+                ),
+                callback_data=f"copen:{c.id}"
+            )
+        ])
+
+    buttons.append(
+        pagination_keyboard(
+            "cfilter",
+            page,
+            total_pages
+        ).inline_keyboard[0]
+    )
+
+    summary = " | ".join(
+        x for x in [
+            area,
+            property_type_value,
+            status,
+        ] if x
+    ) or "بدون فیلتر"
+
+    await target.answer(
+        f"🧰 **فیلتر مشتری: {summary}**\n"
+        f"صفحه {page} از {total_pages} — "
+        f"{total} نتیجه",
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=buttons
+        ),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text == "🧰 فیلتر مشتری")
+async def client_filter_start(
+    message: Message,
+    state: FSMContext
+):
+
+    if not await access_required(message):
+        return
+
+    await state.clear()
+
+    await state.set_state(
+        ClientFilterForm.area
+    )
+
+    await message.answer(
+        "📍 منطقه را انتخاب کن:",
+        reply_markup=one_column([
+            *AREAS,
+            ALL_AREAS
+        ])
+    )
+
+
+@dp.message(ClientFilterForm.area)
+async def client_filter_area(
+    message: Message,
+    state: FSMContext
+):
+
+    valid = [*AREAS, ALL_AREAS]
+
+    if message.text not in valid:
+        await message.answer(
+            "لطفاً یکی از مناطق یا «همه مناطق» را انتخاب کن."
+        )
+        return
+
+    await state.update_data(
+        filter_area=message.text
+    )
+
+    await state.set_state(
+        ClientFilterForm.property_type
+    )
+
+    await message.answer(
+        "🏢 نوع ملک را انتخاب کن:",
+        reply_markup=one_column([
+            *PROPERTY_TYPES,
+            ALL_PROPERTY_TYPES
+        ])
+    )
+
+
+@dp.message(ClientFilterForm.property_type)
+async def client_filter_type(
+    message: Message,
+    state: FSMContext
+):
+
+    valid = [*PROPERTY_TYPES, ALL_PROPERTY_TYPES]
+
+    if message.text not in valid:
+        await message.answer(
+            "لطفاً یکی از انواع یا «همه انواع» را انتخاب کن."
+        )
+        return
+
+    await state.update_data(
+        filter_property_type=message.text
+    )
+
+    await state.set_state(
+        ClientFilterForm.status
+    )
+
+    await message.answer(
+        "📊 وضعیت را انتخاب کن:",
+        reply_markup=one_column([
+            *CLIENT_STATUSES,
+            ALL_STATUSES
+        ])
+    )
+
+
+@dp.message(ClientFilterForm.status)
+async def client_filter_status(
+    message: Message,
+    state: FSMContext
+):
+
+    valid = [*CLIENT_STATUSES, ALL_STATUSES]
+
+    if message.text not in valid:
+        await message.answer(
+            "لطفاً یکی از وضعیت‌ها یا «همه وضعیت‌ها» را انتخاب کن."
+        )
+        return
+
+    data = await state.get_data()
+
+    filters = {
+        "area": data.get("filter_area"),
+        "property_type": data.get(
+            "filter_property_type"
+        ),
+        "status": message.text,
+    }
+
+    await state.update_data(
+        last_client_filter=filters
+    )
+
+    await state.set_state(None)
+
+    await message.answer(
+        "✅ فیلتر اعمال شد.",
+        reply_markup=main_menu(
+            message.from_user.id
+        )
+    )
+
+    await send_client_filter_page(
+        message,
+        filters,
+        1
+    )
+
+
+@dp.callback_query(F.data.startswith("cfilter:"))
+async def client_filter_page_callback(
+    callback: CallbackQuery,
+    state: FSMContext
+):
+
+    if not await callback_access_required(callback):
+        return
+
+    data = await state.get_data()
+
+    filters = data.get(
+        "last_client_filter"
+    )
+
+    if not filters:
+        await callback.answer(
+            "فیلتر فعالی پیدا نشد.",
+            show_alert=True
+        )
+        return
+
+    page = int(
+        callback.data.split(":")[1]
+    )
+
+    await send_client_filter_page(
+        callback.message,
+        filters,
+        page
+    )
+
+    await callback.answer()
+
+
+# =========================================================
 # CLIENT DETAIL
 # =========================================================
 
@@ -3371,6 +4568,14 @@ async def send_client_detail(
         )
         return
 
+    year_range = "نامشخص"
+
+    if client.max_year_built > 0:
+        year_range = (
+            f"{client.min_year_built} تا "
+            f"{client.max_year_built}"
+        )
+
     await target.answer(
         f"👤 **{client.name}**\n\n"
         f"📞 تلفن: {client.phone}\n"
@@ -3382,6 +4587,7 @@ async def send_client_detail(
         f"{money(client.min_budget)} تا "
         f"{money(client.max_budget)}\n"
         f"🏢 نوع ملک: {client.property_type}\n"
+        f"🏗 سال ساخت مدنظر: {year_range}\n"
         f"📊 وضعیت: {client.status}\n"
         f"📝 توضیحات: {client.description}",
         reply_markup=InlineKeyboardMarkup(
@@ -4134,7 +5340,7 @@ async def matching_client_selected(
         score = 0
 
         # =================================================
-        # بودجه = 40%
+        # قیمت = 40%
         # =================================================
 
         if client.max_budget > 0:
@@ -4159,18 +5365,47 @@ async def matching_client_selected(
                 if difference <= 0.10:
                     score += 20
 
+        else:
+            # No budget preference set - don't penalize.
+            score += 40
+
         # =================================================
-        # منطقه = 25%
+        # منطقه = 30%
         # =================================================
 
         if (
             client.area == ALL_AREAS
             or client.area == p.area
         ):
-            score += 25
+            score += 30
 
         # =================================================
-        # متراژ = 20%
+        # سال ساخت = 15%
+        # =================================================
+
+        if client.max_year_built > 0:
+
+            if (
+                client.min_year_built <= p.year_built
+                <= client.max_year_built
+            ):
+                score += 15
+
+            elif (
+                p.year_built > 0
+                and abs(
+                    p.year_built -
+                    client.max_year_built
+                ) <= 3
+            ):
+                score += 7
+
+        else:
+            # No year preference set - don't penalize.
+            score += 15
+
+        # =================================================
+        # متراژ = 10%
         # =================================================
 
         if client.max_sqm > 0:
@@ -4179,7 +5414,7 @@ async def matching_client_selected(
                 client.min_sqm <= p.sqm
                 <= client.max_sqm
             ):
-                score += 20
+                score += 10
 
             elif (
                 abs(
@@ -4189,10 +5424,13 @@ async def matching_client_selected(
                 / client.max_sqm
                 <= 0.10
             ):
-                score += 10
+                score += 5
+
+        else:
+            score += 10
 
         # =================================================
-        # نوع ملک = 15%
+        # نوع ملک = 5%
         # =================================================
 
         if (
@@ -4201,7 +5439,7 @@ async def matching_client_selected(
             or client.property_type ==
             "سایر"
         ):
-            score += 15
+            score += 5
 
         scored.append(
             (
@@ -4245,6 +5483,7 @@ async def matching_client_selected(
             f"📐 {money(p.sqm)} متر\n"
             f"💰 {money(p.price)}\n"
             f"🏢 {p.property_type}\n"
+            f"🏗 سال ساخت: {p.year_built}\n"
             f"🎯 تطابق: {score}%"
             f"{visited_text}\n"
         )
