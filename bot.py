@@ -4836,33 +4836,21 @@ async def followups(
 # =========================================================
 
 @dp.message(F.text == "🔎 پیشنهاد فایل")
-async def matching(
-    message: Message
-):
+async def matching(message: Message):
 
     if not await access_required(message):
         return
 
     async with SessionLocal() as session:
-
         result = await session.execute(
             select(Client)
-            .where(
-                active_client_filter()
-            )
-            .order_by(
-                Client.created_at.desc()
-            )
+            .where(active_client_filter())
+            .order_by(Client.created_at.desc())
         )
-
         clients = result.scalars().all()
 
     if not clients:
-
-        await message.answer(
-            "مشتری فعالی وجود ندارد."
-        )
-
+        await message.answer("مشتری فعالی وجود ندارد.")
         return
 
     await message.answer(
@@ -4874,201 +4862,166 @@ async def matching(
     )
 
 
-@dp.message(
-    F.text.regexp(
-        r"^.*\|\s*\d+$"
+async def send_matching_page(target, client_id: int, page: int = 1):
+    """نمایش صفحه‌بندی‌شده پیشنهادهای فایل برای یک مشتری."""
+
+    async with SessionLocal() as session:
+        client_result = await session.execute(
+            select(Client).where(Client.id == client_id)
+        )
+        client = client_result.scalar_one_or_none()
+
+        if not client:
+            await target.answer("مشتری پیدا نشد.")
+            return
+
+        if client.status not in ACTIVE_CLIENT_STATUSES:
+            await target.answer("⚠️ این مشتری دیگر در لیست فعال نیست.")
+            return
+
+        prop_result = await session.execute(
+            select(Property).where(active_property_filter())
+        )
+        properties = prop_result.scalars().all()
+
+        visited_result = await session.execute(
+            select(Visit.property_id).where(Visit.client_id == client.id)
+        )
+        visited_ids = set(visited_result.scalars().all())
+
+    scored = []
+
+    for p in properties:
+        score = 0
+
+        # بودجه = 40%
+        if client.max_budget > 0:
+            if p.price <= client.max_budget:
+                if client.min_budget <= 0 or p.price >= client.min_budget:
+                    score += 40
+                else:
+                    score += 30
+            else:
+                difference = (p.price - client.max_budget) / client.max_budget
+                if difference <= 0.10:
+                    score += 20
+
+        # منطقه = 25%
+        if client.area == ALL_AREAS or client.area == p.area:
+            score += 25
+
+        # متراژ = 20%
+        if client.max_sqm > 0:
+            if client.min_sqm <= p.sqm <= client.max_sqm:
+                score += 20
+            elif abs(p.sqm - client.max_sqm) / client.max_sqm <= 0.10:
+                score += 10
+
+        # نوع ملک = 15%
+        if client.property_type == p.property_type or client.property_type == "سایر":
+            score += 15
+
+        scored.append((score, p, p.id in visited_ids))
+
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if not scored:
+        await target.answer("فایل مناسبی پیدا نشد.")
+        return
+
+    # صفحه‌بندی پیشنهادها
+    page_size = 5
+    total = len(scored)
+    total_pages = (total + page_size - 1) // page_size
+    page = max(1, min(page, total_pages))
+    start_index = (page - 1) * page_size
+    page_items = scored[start_index:start_index + page_size]
+
+    lines = [
+        f"🔎 **پیشنهاد فایل برای {client.name}**\n",
+        f"صفحه {page} از {total_pages} — {total} پیشنهاد\n"
+    ]
+
+    buttons = []
+
+    for score, prop, visited in page_items:
+        visited_text = " | 👀 قبلاً دیده شده" if visited else ""
+        lines.append(
+            f"🏠 {prop.code}\n"
+            f"📍 {prop.area}\n"
+            f"📐 {money(prop.sqm)} متر\n"
+            f"💰 {money(prop.price)}\n"
+            f"🏢 {prop.property_type}\n"
+            f"🎯 تطابق: {score}%{visited_text}\n"
+        )
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"🏠 مشاهده {prop.code}",
+                callback_data=f"popen:{prop.id}"
+            )
+        ])
+
+    # ناوبری صفحات
+    nav = []
+    if page > 1:
+        nav.append(
+            InlineKeyboardButton(
+                text="⬅️ قبلی",
+                callback_data=f"matchpage:{client.id}:{page - 1}"
+            )
+        )
+    nav.append(
+        InlineKeyboardButton(
+            text=f"{page}/{total_pages}",
+            callback_data="noop"
+        )
     )
-)
-async def matching_client_selected(
-    message: Message
-):
+    if page < total_pages:
+        nav.append(
+            InlineKeyboardButton(
+                text="بعدی ➡️",
+                callback_data=f"matchpage:{client.id}:{page + 1}"
+            )
+        )
+    buttons.append(nav)
+
+    await target.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="Markdown"
+    )
+
+
+@dp.message(F.text.regexp(r"^.*\|\s*\d+$"))
+async def matching_client_selected(message: Message):
 
     if not await access_required(message):
         return
 
     try:
-        client_id = int(
-            message.text
-            .split("|")[-1]
-            .strip()
-        )
+        client_id = int(message.text.split("|")[-1].strip())
     except Exception:
         return
 
-    async with SessionLocal() as session:
+    await send_matching_page(message, client_id, 1)
 
-        client_result = await session.execute(
-            select(Client).where(
-                Client.id == client_id
-            )
-        )
 
-        client = (
-            client_result
-            .scalar_one_or_none()
-        )
+@dp.callback_query(F.data.startswith("matchpage:"))
+async def matching_page_callback(callback: CallbackQuery):
 
-        if not client:
-            return
-
-        if client.status not in ACTIVE_CLIENT_STATUSES:
-
-            await message.answer(
-                "⚠️ این مشتری دیگر در لیست فعال نیست."
-            )
-            return
-
-        prop_result = await session.execute(
-            select(Property).where(
-                active_property_filter()
-            )
-        )
-
-        properties = (
-            prop_result
-            .scalars()
-            .all()
-        )
-
-        visited_result = await session.execute(
-            select(
-                Visit.property_id
-            ).where(
-                Visit.client_id ==
-                client.id
-            )
-        )
-
-        visited_ids = {
-            x
-            for x in visited_result.scalars().all()
-        }
-
-    scored = []
-
-    for p in properties:
-
-        score = 0
-
-        # =================================================
-        # بودجه = 40%
-        # =================================================
-
-        if client.max_budget > 0:
-
-            if p.price <= client.max_budget:
-
-                if (
-                    client.min_budget <= 0
-                    or p.price >= client.min_budget
-                ):
-                    score += 40
-                else:
-                    score += 30
-
-            else:
-
-                difference = (
-                    p.price -
-                    client.max_budget
-                ) / client.max_budget
-
-                if difference <= 0.10:
-                    score += 20
-
-        # =================================================
-        # منطقه = 25%
-        # =================================================
-
-        if (
-            client.area == ALL_AREAS
-            or client.area == p.area
-        ):
-            score += 25
-
-        # =================================================
-        # متراژ = 20%
-        # =================================================
-
-        if client.max_sqm > 0:
-
-            if (
-                client.min_sqm <= p.sqm
-                <= client.max_sqm
-            ):
-                score += 20
-
-            elif (
-                abs(
-                    p.sqm -
-                    client.max_sqm
-                )
-                / client.max_sqm
-                <= 0.10
-            ):
-                score += 10
-
-        # =================================================
-        # نوع ملک = 15%
-        # =================================================
-
-        if (
-            client.property_type ==
-            p.property_type
-            or client.property_type ==
-            "سایر"
-        ):
-            score += 15
-
-        scored.append(
-            (
-                score,
-                p,
-                p.id in visited_ids
-            )
-        )
-
-    scored.sort(
-        key=lambda x: x[0],
-        reverse=True
-    )
-
-    top = scored[:10]
-
-    if not top:
-
-        await message.answer(
-            "فایل مناسبی پیدا نشد."
-        )
-
+    if not await callback_access_required(callback):
         return
 
-    lines = [
-        f"🔎 پیشنهاد فایل برای "
-        f"{client.name}\n"
-    ]
+    try:
+        _, client_id, page = callback.data.split(":")
+        client_id = int(client_id)
+        page = int(page)
+    except Exception:
+        await callback.answer("صفحه نامعتبر است.")
+        return
 
-    for score, p, visited in top:
-
-        visited_text = (
-            " | 👀 قبلاً دیده شده"
-            if visited
-            else ""
-        )
-
-        lines.append(
-            f"🏠 {p.code}\n"
-            f"📍 {p.area}\n"
-            f"📐 {money(p.sqm)} متر\n"
-            f"💰 {money(p.price)}\n"
-            f"🏢 {p.property_type}\n"
-            f"🎯 تطابق: {score}%"
-            f"{visited_text}\n"
-        )
-
-    await message.answer(
-        "\n".join(lines)
-    )
+    await send_matching_page(callback.message, client_id, page)
+    await callback.answer()
 
 
 # =========================================================
