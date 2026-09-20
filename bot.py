@@ -97,7 +97,11 @@ elif DATABASE_URL.startswith("sqlite:///"):
 
 engine = create_async_engine(
     DATABASE_URL,
-    echo=False
+    echo=False,
+    connect_args={
+        "statement_cache_size": 0,
+        "prepared_statement_cache_size": 0,
+    },
 )
 
 SessionLocal = async_sessionmaker(
