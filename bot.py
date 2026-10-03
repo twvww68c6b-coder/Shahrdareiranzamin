@@ -326,6 +326,12 @@ class Property(Base):
         String(100), default=""
     )
 
+    # سال ساخت (شمسی)؛ 0 = نامشخص
+    build_year: Mapped[int] = mapped_column(
+        Integer, default=0
+    )
+
+
 
 class PropertyPhoto(Base):
     __tablename__ = "property_photos"
@@ -679,7 +685,11 @@ class PropertyForm(StatesGroup):
     floors = State()
     unit_floor = State()
     units_per_floor = State()
+
+    build_year = State()
+
     elevator = State()
+
     parking = State()
     parking_type = State()
     storage = State()
@@ -702,8 +712,15 @@ class ClientForm(StatesGroup):
     max_sqm = State()
     min_budget = State()
     max_budget = State()
+
+    max_deposit = State()
+
+    max_rent = State()
+
     property_type = State()
+
     description = State()
+
 
 
 class VisitForm(StatesGroup):
@@ -1134,6 +1151,7 @@ async def migrate():
                 ("floor_label", "VARCHAR(50) DEFAULT ''"),
                 ("convertible", "VARCHAR(30) DEFAULT ''"),
                 ("lease_term", "VARCHAR(100) DEFAULT ''"),
+                ("build_year", "INTEGER DEFAULT 0"),
             ],
             "clients": [
                 ("deal_type", "VARCHAR(30) DEFAULT 'فروش'"),
@@ -1284,7 +1302,8 @@ ENV_SALE = "فروش"
 ENV_RENT = "اجاره"
 ENV_BUTTONS = {
     "🏠 فروش": ENV_SALE,
-    "🔑 اجاره": ENV_RENT,
+    "🔑 رهن و اجاره": ENV_RENT,
+    "🔑 اجاره": ENV_RENT,  # سازگاری با کیبوردهای قدیمی
 }
 RENT_TYPES = ["رهن کامل", "رهن و اجاره", "اجاره"]
 
@@ -1331,7 +1350,7 @@ def current_env(tg_id):
 def env_main_menu(user_id: int):
     if user_id not in USER_ENV:
         return keyboard(
-            [["🏠 فروش", "🔑 اجاره"]],
+            [["🏠 فروش", "🔑 رهن و اجاره"]],
             include_cancel=False
         )
     return keyboard(
@@ -1345,7 +1364,7 @@ def env_main_menu(user_id: int):
 
 
 def env_title(env):
-    return "🏠 فروش" if env == ENV_SALE else "🔑 اجاره"
+    return "🏠 فروش" if env == ENV_SALE else "🔑 رهن و اجاره"
 
 
 def pref_icon(value):
@@ -2165,6 +2184,7 @@ async def property_section(callback: CallbackQuery):
             f"📐 متراژ: {money(p.sqm)}\n"
             f"🛏 خواب: {p.bedrooms}\n"
             f"🏠 طبقه: {floor_text(p)}\n"
+            f"🏗 سال ساخت: {build_year_text(p)}\n"
             f"🚪 واحد در طبقه: {p.units_per_floor}\n"
             f"🛗 آسانسور: {p.elevator or '—'}\n"
             f"🚗 پارکینگ: {p.parking or '—'}"
@@ -3105,9 +3125,23 @@ async def send_match_page(
     rows = []
     for i, (m, obj, was_visited) in enumerate(part, start=1):
         if direction == "f":
-            name = f"{obj.code} | {obj.area} | {prop_price_text(obj)}"
-            open_cb = f"popen:{obj.id}"
+            # لیست خلاصه: فقط درصد + متراژ + شناسه فایل
+            lines.append(
+                f"{match_icon(m['score'])} {m['score']}٪ تطابق"
+            )
+            lines.append(f"📐 {money(obj.sqm)} متر")
+            lines.append(f"🏠 فایل {obj.code}")
+            lines.append("")
+            rows.append([InlineKeyboardButton(
+                text=f"🏠 فایل {obj.code}",
+                callback_data=(
+                    f"mfd:{ref_id}:{obj.id}:{page}:"
+                    f"{1 if weak else 0}"
+                )
+            )])
+            continue
         else:
+
             name = f"{obj.name} | {obj.area}"
             open_cb = f"copen:{obj.id}"
         seen = " 👀" if was_visited else ""
@@ -3161,8 +3195,11 @@ async def match_files_for_client(callback: CallbackQuery):
     await send_match_page(
         callback.message, "f", int(ref), int(page),
         callback.from_user, weak == "1",
-        edit=(callback.message.text or "").startswith("🎯")
+        edit=(callback.message.text or "").startswith(
+            ("🎯", "🏠 فایل")
+        )
     )
+
     await callback.answer()
 
 
@@ -3175,6 +3212,82 @@ async def match_clients_for_file(callback: CallbackQuery):
         callback.message, "c", int(ref), int(page),
         callback.from_user, weak == "1",
         edit=(callback.message.text or "").startswith("🎯")
+    )
+    await callback.answer()
+
+
+def match_icon(score):
+    if score >= 80:
+        return "🟢"
+    if score >= 60:
+        return "🟡"
+    return "🟠"
+
+
+@dp.callback_query(F.data.startswith("mfd:"))
+async def match_file_detail(callback: CallbackQuery):
+    """جزئیات یک پیشنهاد: اطلاعات فایل + درصد + دلایل تطابق."""
+    if not await callback_access_required(callback):
+        return
+    _, cid, pid, page, weak = callback.data.split(":")
+    tg = callback.from_user
+    async with SessionLocal() as session:
+        user = await get_user(session, tg.id, tg.full_name)
+        client = await load_obj(session, "c", int(cid))
+        prop = await load_obj(session, "p", int(pid))
+    if not client or not prop:
+        await callback.answer("پیدا نشد", show_alert=True)
+        return
+    if (
+        (prop.ownership_type or "عمومی") == "شخصی"
+        and not is_admin(tg.id)
+        and prop.owner_user_id != user.id
+    ):
+        await callback.answer("دسترسی ندارید.", show_alert=True)
+        return
+    m = match_score(client, prop)
+    if m is None:
+        await callback.answer(
+            "نوع معامله فایل و مشتری یکسان نیست.", show_alert=True
+        )
+        return
+    lines = [
+        f"🏠 فایل {prop.code}",
+        f"{match_icon(m['score'])} میزان تطابق: {m['score']}٪",
+        f"📐 متراژ: {money(prop.sqm)} متر",
+        f"📍 منطقه: {prop.area}",
+        f"🛏 خواب: {prop.bedrooms}",
+        f"🏢 طبقه: {floor_text(prop)}",
+        f"🏷 نوع: {prop.property_type or '—'}",
+        f"🏗 سال ساخت: {build_year_text(prop)}",
+    ]
+    if prop.deal_type == ENV_RENT:
+        lines.append(f"💵 رهن: {money(prop.deposit)}")
+        lines.append(f"💵 اجاره: {money(prop.rent)}")
+        if prop.rent_type:
+            lines.append(f"🔑 نوع: {prop.rent_type}")
+    else:
+        lines.append(f"💰 قیمت: {money(prop.price)}")
+    lines.append(
+        f"🛗 {prop.elevator or '—'} | 🚗 {prop.parking or '—'} "
+        f"| 📦 {prop.storage or '—'}"
+    )
+    lines.append("")
+    lines.append("دلایل تطابق:")
+    lines.extend(m["reasons"])
+    rows = [
+        [InlineKeyboardButton(
+            text="📋 مشاهده کامل فایل",
+            callback_data=f"popen:{prop.id}"
+        )],
+        [InlineKeyboardButton(
+            text="⬅️ بازگشت",
+            callback_data=f"mf:{client.id}:{page}:{weak}"
+        )],
+    ]
+    await show(
+        callback.message, "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=True
     )
     await callback.answer()
 
@@ -3564,16 +3677,18 @@ async def property_start(
     if not await access_required(message):
         return
 
+    if not await require_env(message):
+        return
     await state.clear()
-
     await state.set_state(
         PropertyForm.code
     )
-
     await message.answer(
-        "➕ ثبت فایل جدید\n\n"
+        f"➕ ثبت فایل جدید — "
+        f"{env_title(current_env(message.from_user.id))}\n\n"
         "کد فایل را وارد کن:"
     )
+
 
 
 @dp.message(PropertyForm.code)
@@ -3678,14 +3793,26 @@ async def property_sqm(
     await state.update_data(
         sqm=value
     )
-
+    if current_env(message.from_user.id) == ENV_RENT:
+        # فایل رهن و اجاره: قیمت فروش پرسیده نمی‌شود
+        await state.update_data(price=0)
+        await state.set_state(
+            PropertyForm.property_type
+        )
+        await message.answer(
+            "🏢 نوع ملک را انتخاب کن:",
+            reply_markup=one_column(
+                PROPERTY_TYPES
+            )
+        )
+        return
     await state.set_state(
         PropertyForm.price
     )
-
     await message.answer(
         "💰 قیمت کل را وارد کن:"
     )
+
 
 
 @dp.message(PropertyForm.price)
@@ -3886,11 +4013,65 @@ async def property_units(
     await state.update_data(
         units_per_floor=value
     )
+    await state.set_state(
+        PropertyForm.build_year
+    )
+    await message.answer(
+        "🏗 سال ساخت (شمسی، مثلاً 1398) را وارد کن.\n"
+        "اگر نامشخص است 0 بزن:",
+        reply_markup=keyboard([
+            ["0"]
+        ])
+    )
 
+
+
+def jalali_year_now():
+    now = datetime.utcnow() + TEHRAN_OFFSET
+    if (now.month, now.day) >= (3, 21):
+        return now.year - 621
+    return now.year - 622
+
+
+def build_year_text(p):
+    by = getattr(p, "build_year", 0) or 0
+    if by <= 0:
+        return "—"
+    age = max(0, jalali_year_now() - by)
+    if age == 0:
+        return f"{by} (نوساز)"
+    return f"{by} ({age} ساله)"
+
+
+def preview_price_lines(data, tg_id):
+    if current_env(tg_id) == ENV_RENT:
+        return (
+            f"💵 رهن: {money(data.get('deposit'))}\n"
+            f"💵 اجاره: {money(data.get('rent'))}\n"
+        )
+    return "💰 قیمت: " + money(data.get("price")) + "\n"
+
+
+@dp.message(PropertyForm.build_year)
+async def property_build_year(
+    message: Message,
+    state: FSMContext
+):
+    value = int(number(message.text, -1))
+    if value != 0 and not (
+        1300 <= value <= jalali_year_now() + 3
+    ):
+        await message.answer(
+            "سال ساخت معتبر (شمسی، مثلاً 1398) "
+            "یا 0 برای نامشخص وارد کن."
+        )
+        return
+    await state.update_data(
+        build_year=value
+    )
     await state.set_state(
         PropertyForm.elevator
     )
-
     await message.answer(
         "🛗 آسانسور؟",
         reply_markup=keyboard([
@@ -4006,10 +4187,20 @@ async def property_storage(
     await state.update_data(
         storage=message.text
     )
-
+    if current_env(message.from_user.id) == ENV_RENT:
+        # فایل رهن و اجاره: مستقیم سراغ رهن و اجاره
+        await state.set_state(
+            PropertyForm.deposit
+        )
+        await message.answer(
+            "💵 مبلغ رهن/ودیعه را وارد کن.\n"
+            "اگر ندارد 0 بزن:"
+        )
+        return
     await state.set_state(
         PropertyForm.tenant
     )
+
 
     await message.answer(
         "وضعیت سکونت:",
@@ -4069,14 +4260,19 @@ async def property_tenant(
 
         return
 
+    # فایل فروش: مبلغ رهن/اجاره پرسیده نمی‌شود
+    await state.update_data(
+        deposit=0,
+        rent=0
+    )
     await state.set_state(
-        PropertyForm.deposit
+        PropertyForm.vacancy_date
+    )
+    await message.answer(
+        "📅 تاریخ تخلیه:\n"
+        "اگر خالی است بنویس «الان»"
     )
 
-    await message.answer(
-        "💵 مبلغ رهن/ودیعه را وارد کن.\n"
-        "اگر ندارد ۰ بزن:"
-    )
 
 
 @dp.message(PropertyForm.deposit)
@@ -4217,12 +4413,13 @@ async def property_description(
         f"📍 منطقه: {data.get('area')}\n"
         f"🏠 آدرس: {data.get('address')}\n"
         f"📐 متراژ: {money(data.get('sqm'))}\n"
-        f"💰 قیمت: {money(data.get('price'))}\n"
+        f"{preview_price_lines(data, message.from_user.id)}"
         f"🏢 نوع: {data.get('property_type')}\n"
         f"🛏 خواب: {data.get('bedrooms')}\n"
         f"🏢 طبقات: {data.get('floors')}\n"
         f"🏠 طبقه ملک: {data.get('unit_floor')}\n"
         f"🚪 واحد در طبقه: {data.get('units_per_floor')}\n"
+        f"🏗 سال ساخت: {data.get('build_year') or '—'}\n"
         f"🛗 آسانسور: {data.get('elevator')}\n"
         f"🚗 پارکینگ: {data.get('parking')}\n"
         f"📦 انباری: {data.get('storage')}\n"
@@ -4283,7 +4480,8 @@ async def property_confirmation(
             area=data["area"],
             address=data["address"],
             sqm=data["sqm"],
-            price=data["price"],
+            price=data.get("price", 0),
+            build_year=int(data.get("build_year", 0) or 0),
             property_type=data["property_type"],
             bedrooms=data["bedrooms"],
             floors=data["floors"],
@@ -5021,6 +5219,7 @@ EDIT_FIELDS = {
     "floors": "🏢 کل طبقات",
     "unit_floor": "🏠 طبقه ملک",
     "units_per_floor": "🚪 واحد در طبقه",
+    "build_year": "🏗 سال ساخت",
     "elevator": "🛗 آسانسور",
     "parking": "🚗 پارکینگ",
     "parking_type": "🅿️ نوع پارکینگ",
@@ -5037,12 +5236,18 @@ EDIT_FIELDS = {
 
 
 def edit_keyboard(
-    prop_id
+    prop_id,
+    deal_type=None
 ):
     rows = []
     current = []
-
     for field, label in EDIT_FIELDS.items():
+        # فایل اجاره: قیمت فروش؛ فایل فروش: رهن/اجاره نمایش داده نشود
+        if deal_type == ENV_RENT and field == "price":
+            continue
+        if deal_type == ENV_SALE and field in {"deposit", "rent"}:
+            continue
+
 
         current.append(
             InlineKeyboardButton(
@@ -5105,12 +5310,16 @@ async def property_edit_start(
         property_id=prop_id
     )
 
+    async with SessionLocal() as session:
+        _p = await load_obj(session, "p", prop_id)
     await callback.message.answer(
         "✏️ کدام فیلد را می‌خواهی اصلاح کنی؟",
         reply_markup=edit_keyboard(
-            prop_id
+            prop_id,
+            _p.deal_type if _p else None
         )
     )
+
 
     await callback.answer()
 
@@ -5258,7 +5467,9 @@ async def property_edit_value(
         "units_per_floor",
         "deposit",
         "rent",
+        "build_year",
     }
+
 
     if field in numeric_fields:
 
@@ -5275,7 +5486,9 @@ async def property_edit_value(
             "floors",
             "unit_floor",
             "units_per_floor",
+            "build_year",
         }:
+
             value = int(value)
 
     else:
@@ -6171,11 +6384,13 @@ async def client_start(
     if not await access_required(message):
         return
 
+    if not await require_env(message):
+        return
     await state.clear()
-
     await state.set_state(
         ClientForm.name
     )
+
 
     await message.answer(
         "➕ ثبت مشتری\n\n"
@@ -6285,14 +6500,22 @@ async def client_max_sqm(
     await state.update_data(
         max_sqm=number(message.text)
     )
-
+    if current_env(message.from_user.id) == ENV_RENT:
+        # مشتری رهن و اجاره: سقف رهن و اجاره (نه بودجه خرید)
+        await state.set_state(
+            ClientForm.max_deposit
+        )
+        await message.answer(
+            "💵 سقف رهن را بنویس (برای بدون محدودیت 0):"
+        )
+        return
     await state.set_state(
         ClientForm.min_budget
     )
-
     await message.answer(
         "💰 حداقل بودجه:"
     )
+
 
 
 @dp.message(ClientForm.min_budget)
@@ -6328,6 +6551,49 @@ async def client_max_budget(
         ClientForm.property_type
     )
 
+    await message.answer(
+        "🏢 نوع ملک موردنظر:",
+        reply_markup=one_column(
+            PROPERTY_TYPES
+        )
+    )
+
+
+@dp.message(ClientForm.max_deposit)
+async def client_max_deposit(
+    message: Message,
+    state: FSMContext
+):
+    value = number(message.text, None)
+    if value is None or value < 0:
+        await message.answer("عدد معتبر وارد کن.")
+        return
+    await state.update_data(
+        max_deposit=value
+    )
+    await state.set_state(
+        ClientForm.max_rent
+    )
+    await message.answer(
+        "💵 سقف اجاره ماهانه را بنویس (یا 0):"
+    )
+
+
+@dp.message(ClientForm.max_rent)
+async def client_max_rent(
+    message: Message,
+    state: FSMContext
+):
+    value = number(message.text, None)
+    if value is None or value < 0:
+        await message.answer("عدد معتبر وارد کن.")
+        return
+    await state.update_data(
+        max_rent=value
+    )
+    await state.set_state(
+        ClientForm.property_type
+    )
     await message.answer(
         "🏢 نوع ملک موردنظر:",
         reply_markup=one_column(
@@ -6374,8 +6640,10 @@ async def client_save(
             area=data["area"],
             min_sqm=data["min_sqm"],
             max_sqm=data["max_sqm"],
-            min_budget=data["min_budget"],
-            max_budget=data["max_budget"],
+            min_budget=data.get("min_budget", 0),
+            max_deposit=data.get("max_deposit", 0),
+            max_rent=data.get("max_rent", 0),
+            max_budget=data.get("max_budget", 0),
             property_type=data["property_type"],
             bedrooms=0,
             description=message.text,
@@ -7635,8 +7903,12 @@ async def send_matching_page(target, client_id: int, page: int = 1):
             return
 
         prop_result = await session.execute(
-            select(Property).where(active_property_filter())
+            select(Property).where(
+                active_property_filter(),
+                Property.deal_type == (client.deal_type or ENV_SALE),
+            )
         )
+
         properties = prop_result.scalars().all()
 
         visited_result = await session.execute(
