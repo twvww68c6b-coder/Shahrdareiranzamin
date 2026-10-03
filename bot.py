@@ -143,6 +143,10 @@ class User(Base):
         default=datetime.utcnow
     )
 
+    # ---- Stage 3+ additions ----
+    can_sale: Mapped[int] = mapped_column(Integer, default=1)
+    can_rent: Mapped[int] = mapped_column(Integer, default=1)
+
 
 class Property(Base):
     __tablename__ = "properties"
@@ -890,23 +894,7 @@ def one_column(
 
 
 def main_menu(user_id: int):
-    rows = [
-        ["🏠 فایل‌ها", "👤 مشتری‌ها"],
-        ["➕ ثبت فایل", "➕ ثبت مشتری"],
-        ["👀 ثبت بازدید", "📞 پیگیری"],
-        ["🔎 پیشنهاد فایل", "📊 KPI من"],
-    ]
-
-    if is_admin(user_id):
-        rows.append([
-            "📝 آخرین فعالیت‌ها",
-            "👥 KPI تیم"
-        ])
-
-    return keyboard(
-        rows,
-        include_cancel=False
-    )
+    return env_main_menu(user_id)
 
 
 def active_property_filter():
@@ -1129,6 +1117,10 @@ async def migrate():
         # Stage 2: new columns (additive only, nothing is dropped)
         # ------------------------------------------------------
         STAGE2_COLUMNS = {
+            "users": [
+                ("can_sale", "INTEGER DEFAULT 1"),
+                ("can_rent", "INTEGER DEFAULT 1"),
+            ],
             "properties": [
                 ("deal_type", "VARCHAR(30) DEFAULT 'فروش'"),
                 ("rent_type", "VARCHAR(30) DEFAULT ''"),
@@ -1200,6 +1192,12 @@ async def migrate():
                 f"WHERE users.telegram_id = {table_name}.created_by) "
                 f"WHERE owner_user_id IS NULL"
             )
+        await conn.exec_driver_sql(
+            "UPDATE users SET can_sale = 1 WHERE can_sale IS NULL"
+        )
+        await conn.exec_driver_sql(
+            "UPDATE users SET can_rent = 1 WHERE can_rent IS NULL"
+        )
         # Existing clients all prefer (not require) elevator and parking.
         for col, default_value in (
             ("elevator_pref", "ترجیحی"),
@@ -1224,6 +1222,7 @@ async def start(
 ):
 
     await state.clear()
+    USER_ENV.pop(message.from_user.id, None)
 
     if not await access_required(message):
         return
@@ -1239,7 +1238,7 @@ async def start(
     await message.answer(
         "🏙️ **شهردار ایران‌زمین**\n"
         "Hooman Real Estate\n\n"
-        "سیستم مدیریت فایل، مشتری و تیم",
+        "سیستم مدیریت فایل، مشتری و تیم\n\nمحیط کاری را انتخاب کن 👇",
         reply_markup=main_menu(
             message.from_user.id
         ),
@@ -1264,6 +1263,2290 @@ async def cancel_all(
             message.from_user.id
         )
     )
+
+
+# =========================================================
+# STAGE 3-9: ENVIRONMENTS, LISTS, DETAILS, MATCHING, URGENT,
+#            ACTIVITIES  (additive block; old handlers below stay)
+# =========================================================
+
+from datetime import timedelta
+from aiogram.filters import Command
+from sqlalchemy import (
+    update as sa_update,
+    and_,
+    true as sa_true,
+)
+
+ENV_SALE = "فروش"
+ENV_RENT = "اجاره"
+ENV_BUTTONS = {
+    "🏠 فروش": ENV_SALE,
+    "🔑 اجاره": ENV_RENT,
+}
+RENT_TYPES = ["رهن کامل", "رهن و اجاره", "اجاره"]
+
+PREF_REQUIRED = "الزامی"
+PREF_PREFERRED = "ترجیحی"
+PREF_ANY = "مهم نیست"
+PREF_CYCLE = [PREF_REQUIRED, PREF_PREFERRED, PREF_ANY]
+PREF_ICONS = {
+    PREF_REQUIRED: "🔴",
+    PREF_PREFERRED: "🟡",
+    PREF_ANY: "⚪",
+}
+
+LIST_PAGE_SIZE = 6
+MATCH_PAGE_SIZE = 4
+ACTIVITY_PAGE_SIZE = 10
+MATCH_MIN_SCORE = 40
+LAST_FLOOR_SENTINEL = 9999
+TEHRAN_OFFSET = timedelta(hours=3, minutes=30)
+
+# In-memory UI state (per Telegram user)
+USER_ENV = {}
+USER_FILTERS = {}
+ACTIVITY_VIEW = {}
+
+
+class ReplacePhotoForm(StatesGroup):
+    photo = State()
+
+
+class FloorRangeForm(StatesGroup):
+    value = State()
+
+
+class RentBudgetForm(StatesGroup):
+    deposit = State()
+    rent = State()
+
+
+def current_env(tg_id):
+    return USER_ENV.get(tg_id, ENV_SALE)
+
+
+def env_main_menu(user_id: int):
+    if user_id not in USER_ENV:
+        return keyboard(
+            [["🏠 فروش", "🔑 اجاره"]],
+            include_cancel=False
+        )
+    return keyboard(
+        [
+            ["📁 فایل‌ها", "👥 مشتری‌ها"],
+            ["🎯 پیشنهادها", "📊 فعالیت‌ها"],
+            ["🚨 فوری", "🔄 تغییر محیط"],
+        ],
+        include_cancel=False
+    )
+
+
+def env_title(env):
+    return "🏠 فروش" if env == ENV_SALE else "🔑 اجاره"
+
+
+def pref_icon(value):
+    return PREF_ICONS.get(value or PREF_ANY, "⚪")
+
+
+def tehran_time(dt):
+    if not dt:
+        return ""
+    return (dt + TEHRAN_OFFSET).strftime("%m/%d %H:%M")
+
+
+def day_start_utc():
+    now_local = datetime.utcnow() + TEHRAN_OFFSET
+    start_local = now_local.replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return start_local - TEHRAN_OFFSET
+
+
+async def show(target, text, markup=None, edit=False):
+    if edit:
+        try:
+            await target.edit_text(text, reply_markup=markup)
+            return
+        except Exception as exc:
+            if "not modified" in str(exc).lower():
+                return
+    await target.answer(text, reply_markup=markup)
+
+
+def vis_filter(model, user, tg_id):
+    """Personal items are visible only to their owner (and admin)."""
+    if is_admin(tg_id):
+        return None
+    return or_(
+        model.ownership_type.is_(None),
+        model.ownership_type != "شخصی",
+        model.owner_user_id == user.id,
+    )
+
+
+def prop_price_text(p):
+    if p.deal_type == ENV_RENT:
+        return f"رهن {money(p.deposit)} / اجاره {money(p.rent)}"
+    return money(p.price)
+
+
+def client_budget_text(c):
+    if c.deal_type == ENV_RENT:
+        return (
+            f"رهن تا {money(c.max_deposit)} / "
+            f"اجاره تا {money(c.max_rent)}"
+        )
+    return f"{money(c.min_budget)} تا {money(c.max_budget)}"
+
+
+def ownership_text(obj):
+    if (obj.ownership_type or "عمومی") == "شخصی":
+        return "👤 شخصی"
+    return "🌐 عمومی"
+
+
+async def user_name_map(session, ids):
+    ids = {i for i in ids if i}
+    if not ids:
+        return {}
+    result = await session.execute(
+        select(User.id, User.name).where(User.id.in_(ids))
+    )
+    return {row[0]: (row[1] or "بدون نام") for row in result.all()}
+
+
+# =========================================================
+# ENVIRONMENT SELECTION + SUB MENUS
+# =========================================================
+
+@dp.message(F.text.in_(list(ENV_BUTTONS)))
+async def choose_env(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    await state.clear()
+    USER_ENV[message.from_user.id] = ENV_BUTTONS[message.text]
+    await message.answer(
+        f"{message.text}\nمحیط انتخاب شد.",
+        reply_markup=env_main_menu(message.from_user.id)
+    )
+
+
+@dp.message(F.text == "🔄 تغییر محیط")
+async def change_env(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    await state.clear()
+    USER_ENV.pop(message.from_user.id, None)
+    await message.answer(
+        "محیط کاری را انتخاب کن:",
+        reply_markup=env_main_menu(message.from_user.id)
+    )
+
+
+@dp.message(F.text == "⬅️ بازگشت")
+async def back_to_env_menu(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    await state.clear()
+    await message.answer(
+        f"{env_title(current_env(message.from_user.id))}",
+        reply_markup=env_main_menu(message.from_user.id)
+    )
+
+
+async def require_env(message: Message):
+    if message.from_user.id not in USER_ENV:
+        await message.answer(
+            "ابتدا محیط را انتخاب کن:",
+            reply_markup=env_main_menu(message.from_user.id)
+        )
+        return False
+    return True
+
+
+@dp.message(F.text == "📁 فایل‌ها")
+async def files_menu(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not await require_env(message):
+        return
+    await state.clear()
+    await message.answer(
+        f"📁 فایل‌ها — {env_title(current_env(message.from_user.id))}",
+        reply_markup=keyboard(
+            [
+                ["📋 همه فایل‌ها", "👤 فایل‌های من"],
+                ["🌐 فایل‌های عمومی", "🚨 فایل‌های فوری"],
+                ["➕ ثبت فایل", "⬅️ بازگشت"],
+            ],
+            include_cancel=False
+        )
+    )
+
+
+@dp.message(F.text == "👥 مشتری‌ها")
+async def clients_menu(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not await require_env(message):
+        return
+    await state.clear()
+    await message.answer(
+        f"👥 مشتری‌ها — {env_title(current_env(message.from_user.id))}",
+        reply_markup=keyboard(
+            [
+                ["📋 همه مشتری‌ها", "👤 مشتری‌های من"],
+                ["🌐 مشتری‌های عمومی", "🚨 مشتری‌های فوری"],
+                ["➕ ثبت مشتری", "⬅️ بازگشت"],
+            ],
+            include_cancel=False
+        )
+    )
+
+
+LIST_ENTRIES = {
+    "📋 همه فایل‌ها": ("p", "a"),
+    "👤 فایل‌های من": ("p", "m"),
+    "🌐 فایل‌های عمومی": ("p", "g"),
+    "🚨 فایل‌های فوری": ("p", "u"),
+    "📋 همه مشتری‌ها": ("c", "a"),
+    "👤 مشتری‌های من": ("c", "m"),
+    "🌐 مشتری‌های عمومی": ("c", "g"),
+    "🚨 مشتری‌های فوری": ("c", "u"),
+}
+
+
+@dp.message(F.text.in_(list(LIST_ENTRIES)))
+async def list_entry(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not await require_env(message):
+        return
+    await state.clear()
+    kind, mode = LIST_ENTRIES[message.text]
+    USER_FILTERS[(message.from_user.id, kind)] = {}
+    await send_list(message, kind, mode, 1, message.from_user)
+
+
+# =========================================================
+# PAGINATED LISTS (files / clients) WITH FILTERS
+# =========================================================
+
+MODE_TITLES = {
+    "a": "همه",
+    "m": "من",
+    "g": "عمومی",
+    "u": "🚨 فوری",
+}
+
+
+async def send_list(target, kind, mode, page, tg_user, edit=False):
+    tg_id = tg_user.id
+    env = current_env(tg_id)
+    flt = USER_FILTERS.setdefault((tg_id, kind), {})
+    model = Property if kind == "p" else Client
+
+    async with SessionLocal() as session:
+        user = await get_user(session, tg_id, tg_user.full_name)
+        conds = [model.deal_type == env]
+        if flt.get("status"):
+            conds.append(model.status == flt["status"])
+        elif kind == "p":
+            conds.append(active_property_filter())
+        else:
+            conds.append(active_client_filter())
+        vis = vis_filter(model, user, tg_id)
+        if vis is not None:
+            conds.append(vis)
+        if mode == "m":
+            conds.append(model.owner_user_id == user.id)
+        elif mode == "g":
+            conds.append(or_(
+                model.ownership_type.is_(None),
+                model.ownership_type == "عمومی",
+            ))
+        elif mode == "u":
+            conds.append(model.is_urgent == 1)
+        if flt.get("area"):
+            conds.append(model.area == flt["area"])
+
+        total = await session.scalar(
+            select(func.count(model.id)).where(*conds)
+        ) or 0
+        total_pages = max(
+            1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE
+        )
+        page = max(1, min(page, total_pages))
+        result = await session.execute(
+            select(model)
+            .where(*conds)
+            .order_by(model.is_urgent.desc(), model.id.desc())
+            .limit(LIST_PAGE_SIZE)
+            .offset((page - 1) * LIST_PAGE_SIZE)
+        )
+        items = result.scalars().all()
+
+    title = "📁 فایل‌ها" if kind == "p" else "👥 مشتری‌ها"
+    lines = [
+        f"{title} — {env_title(env)} — {MODE_TITLES[mode]}",
+        f"صفحه {page} از {total_pages} — {total} مورد",
+    ]
+    if flt.get("area"):
+        lines.append(f"📍 منطقه: {flt['area']}")
+    if flt.get("status"):
+        lines.append(f"📊 وضعیت: {flt['status']}")
+    if not items:
+        lines.append("\nمورد پیدا نشد.")
+
+    rows = []
+    for obj in items:
+        flag = "🚨 " if obj.is_urgent else ""
+        if kind == "p":
+            label = (
+                f"{flag}{obj.code} | {obj.area} | "
+                f"{money(obj.sqm)}م | {prop_price_text(obj)}"
+            )
+            cb = f"popen:{obj.id}"
+        else:
+            label = (
+                f"{flag}{obj.name} | {obj.area} | "
+                f"{client_budget_text(obj)}"
+            )
+            cb = f"copen:{obj.id}"
+        rows.append([
+            InlineKeyboardButton(text=label[:60], callback_data=cb)
+        ])
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(
+            text="‹ قبلی",
+            callback_data=f"L:{kind}:{mode}:{page - 1}"
+        ))
+    nav.append(InlineKeyboardButton(
+        text=f"{page}/{total_pages}", callback_data="noop"
+    ))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(
+            text="بعدی ›",
+            callback_data=f"L:{kind}:{mode}:{page + 1}"
+        ))
+    rows.append(nav)
+
+    search_cb = "psearch:start" if kind == "p" else "csearch:start"
+    rows.append([
+        InlineKeyboardButton(text="🔍 جست‌وجو", callback_data=search_cb),
+        InlineKeyboardButton(
+            text="📍 منطقه", callback_data=f"FA:{kind}:{mode}"
+        ),
+        InlineKeyboardButton(
+            text="📊 وضعیت", callback_data=f"FT:{kind}:{mode}"
+        ),
+    ])
+    if flt:
+        rows.append([InlineKeyboardButton(
+            text="🧹 حذف فیلترها", callback_data=f"FC:{kind}:{mode}"
+        )])
+
+    await show(
+        target,
+        "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows),
+        edit=edit
+    )
+
+
+@dp.callback_query(F.data.startswith("L:"))
+async def list_page_callback(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    try:
+        _, kind, mode, page = callback.data.split(":")
+        page = int(page)
+    except Exception:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    await send_list(
+        callback.message, kind, mode, page,
+        callback.from_user, edit=True
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("FA:"))
+async def filter_area_menu(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, mode = callback.data.split(":")
+    rows = [[InlineKeyboardButton(
+        text="همه مناطق", callback_data=f"FS:{kind}:{mode}:0"
+    )]]
+    for i, area in enumerate(AREAS, start=1):
+        rows.append([InlineKeyboardButton(
+            text=area, callback_data=f"FS:{kind}:{mode}:{i}"
+        )])
+    await show(
+        callback.message, "📍 منطقه را انتخاب کن:",
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=True
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("FS:"))
+async def filter_area_set(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, mode, idx = callback.data.split(":")
+    idx = int(idx)
+    flt = USER_FILTERS.setdefault((callback.from_user.id, kind), {})
+    if idx == 0 or idx > len(AREAS):
+        flt.pop("area", None)
+    else:
+        flt["area"] = AREAS[idx - 1]
+    await send_list(
+        callback.message, kind, mode, 1, callback.from_user, edit=True
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("FT:"))
+async def filter_status_menu(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, mode = callback.data.split(":")
+    statuses = STATUSES if kind == "p" else CLIENT_STATUSES
+    rows = [[InlineKeyboardButton(
+        text="فقط فعال‌ها", callback_data=f"FU:{kind}:{mode}:0"
+    )]]
+    for i, st in enumerate(statuses, start=1):
+        rows.append([InlineKeyboardButton(
+            text=st, callback_data=f"FU:{kind}:{mode}:{i}"
+        )])
+    await show(
+        callback.message, "📊 وضعیت را انتخاب کن:",
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=True
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("FU:"))
+async def filter_status_set(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, mode, idx = callback.data.split(":")
+    idx = int(idx)
+    statuses = STATUSES if kind == "p" else CLIENT_STATUSES
+    flt = USER_FILTERS.setdefault((callback.from_user.id, kind), {})
+    if idx == 0 or idx > len(statuses):
+        flt.pop("status", None)
+    else:
+        flt["status"] = statuses[idx - 1]
+    await send_list(
+        callback.message, kind, mode, 1, callback.from_user, edit=True
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("FC:"))
+async def filter_clear(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, mode = callback.data.split(":")
+    USER_FILTERS[(callback.from_user.id, kind)] = {}
+    await send_list(
+        callback.message, kind, mode, 1, callback.from_user, edit=True
+    )
+    await callback.answer()
+
+
+# =========================================================
+# POST-CREATE QUICK SETTINGS
+# =========================================================
+
+async def post_create_prompt(message, kind, obj_id):
+    """After a file/client is saved: fill owner, offer quick settings."""
+    tg = message.from_user
+    model = Property if kind == "p" else Client
+    async with SessionLocal() as session:
+        user = await get_user(session, tg.id, tg.full_name)
+        await session.execute(
+            sa_update(model)
+            .where(model.id == obj_id, model.owner_user_id.is_(None))
+            .values(owner_user_id=user.id)
+        )
+        await session.commit()
+        obj = (await session.execute(
+            select(model).where(model.id == obj_id)
+        )).scalar_one_or_none()
+    if not obj:
+        return
+
+    rows = []
+    if kind == "p" and obj.deal_type == ENV_RENT:
+        rows.append([
+            InlineKeyboardButton(
+                text=name, callback_data=f"rt:{obj.id}:{i}"
+            )
+            for i, name in enumerate(RENT_TYPES)
+        ])
+    if kind == "c":
+        if obj.deal_type == ENV_RENT:
+            rows.append([InlineKeyboardButton(
+                text="💵 سقف رهن و اجاره",
+                callback_data=f"crb:{obj.id}"
+            )])
+        rows.append([InlineKeyboardButton(
+            text="⚙️ ترجیحات (آسانسور، پارکینگ، ...)",
+            callback_data=f"cpref:{obj.id}"
+        )])
+    rows.append([
+        InlineKeyboardButton(
+            text="👤 شخصی کردن" if ownership_text(obj) == "🌐 عمومی"
+            else "🌐 عمومی کردن",
+            callback_data=f"own:{kind}:{obj.id}"
+        ),
+        InlineKeyboardButton(
+            text="🚨 فوری کردن", callback_data=f"urg:{kind}:{obj.id}"
+        ),
+    ])
+    rows.append([InlineKeyboardButton(
+        text="👁 مشاهده",
+        callback_data=(
+            f"popen:{obj.id}" if kind == "p" else f"copen:{obj.id}"
+        )
+    )])
+    await message.answer(
+        f"📌 تنظیمات سریع — الان: {ownership_text(obj)}، "
+        f"{env_title(obj.deal_type)}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+
+
+@dp.callback_query(F.data.startswith("rt:"))
+async def set_rent_type(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, pid, idx = callback.data.split(":")
+    async with SessionLocal() as session:
+        await session.execute(
+            sa_update(Property)
+            .where(Property.id == int(pid))
+            .values(rent_type=RENT_TYPES[int(idx)])
+        )
+        await session.commit()
+    await callback.answer(f"✅ {RENT_TYPES[int(idx)]}")
+
+
+# =========================================================
+# OWNERSHIP / URGENT / FOLLOW-UP
+# =========================================================
+
+async def load_obj(session, kind, obj_id):
+    model = Property if kind == "p" else Client
+    return (await session.execute(
+        select(model).where(model.id == obj_id)
+    )).scalar_one_or_none()
+
+
+@dp.callback_query(F.data.startswith("own:"))
+async def toggle_ownership(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, obj_id = callback.data.split(":")
+    obj_id = int(obj_id)
+    async with SessionLocal() as session:
+        user = await get_user(
+            session, callback.from_user.id, callback.from_user.full_name
+        )
+        obj = await load_obj(session, kind, obj_id)
+        if not obj:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        if obj.owner_user_id is None:
+            obj.owner_user_id = user.id
+        if (
+            obj.owner_user_id != user.id
+            and not is_admin(callback.from_user.id)
+        ):
+            await callback.answer(
+                "فقط مسئول این مورد یا مدیر می‌تواند تغییر دهد.",
+                show_alert=True
+            )
+            return
+        obj.ownership_type = (
+            "عمومی" if (obj.ownership_type or "عمومی") == "شخصی"
+            else "شخصی"
+        )
+        await add_activity(
+            session, user.id, "تغییر مالکیت",
+            f"{ownership_text(obj)}",
+            property_id=obj.id if kind == "p" else 0,
+            client_id=obj.id if kind == "c" else 0,
+        )
+        await session.commit()
+    if kind == "p":
+        await send_property_detail(callback.message, obj_id, edit=True)
+    else:
+        await send_client_detail(callback.message, obj_id, edit=True)
+    await callback.answer("✅ انجام شد")
+
+
+async def notify_urgent(kind, obj, actor_tg_id):
+    env = obj.deal_type or ENV_SALE
+    flag_col = User.can_rent if env == ENV_RENT else User.can_sale
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(User).where(flag_col == 1)
+        )
+        recipients = result.scalars().all()
+        names = await user_name_map(session, [obj.owner_user_id])
+    owner_name = names.get(obj.owner_user_id, "—")
+
+    if kind == "p":
+        text = (
+            f"🚨 {env} فوری\n\n"
+            f"{money(obj.sqm)} متر | {obj.area}\n"
+            f"{obj.bedrooms} خواب\n"
+            f"{prop_price_text(obj)}\n"
+            f"👤 مسئول: {owner_name}"
+        )
+        view_cb = f"popen:{obj.id}"
+    else:
+        text = (
+            f"🚨 مشتری {env} فوری\n\n"
+            f"{obj.name} | {obj.area}\n"
+            f"{client_budget_text(obj)}\n"
+            f"👤 مسئول: {owner_name}"
+        )
+        view_cb = f"copen:{obj.id}"
+    markup = InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="مشاهده", callback_data=view_cb),
+        InlineKeyboardButton(
+            text="من پیگیری می‌کنم",
+            callback_data=f"claim:{kind}:{obj.id}"
+        ),
+    ]])
+    sent = 0
+    for u in recipients:
+        if u.telegram_id == actor_tg_id:
+            continue
+        try:
+            await bot.send_message(
+                u.telegram_id, text, reply_markup=markup
+            )
+            sent += 1
+        except Exception as exc:
+            print("URGENT NOTIFY ERROR:", exc)
+    return sent
+
+
+@dp.callback_query(F.data.startswith("urg:"))
+async def toggle_urgent(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, obj_id = callback.data.split(":")
+    obj_id = int(obj_id)
+    async with SessionLocal() as session:
+        user = await get_user(
+            session, callback.from_user.id, callback.from_user.full_name
+        )
+        obj = await load_obj(session, kind, obj_id)
+        if not obj:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        make_urgent = not obj.is_urgent
+        obj.is_urgent = 1 if make_urgent else 0
+        obj.urgent_at = datetime.utcnow() if make_urgent else None
+        if not make_urgent:
+            obj.follow_up_user_id = None
+        await add_activity(
+            session, user.id,
+            "فوری کردن" if make_urgent else "عادی کردن",
+            "",
+            property_id=obj.id if kind == "p" else 0,
+            client_id=obj.id if kind == "c" else 0,
+        )
+        await session.commit()
+    sent = 0
+    if make_urgent:
+        sent = await notify_urgent(kind, obj, callback.from_user.id)
+    if kind == "p":
+        await send_property_detail(callback.message, obj_id, edit=True)
+    else:
+        await send_client_detail(callback.message, obj_id, edit=True)
+    if make_urgent:
+        await callback.answer(
+            f"🚨 فوری شد؛ به {sent} مشاور اطلاع داده شد.",
+            show_alert=True
+        )
+    else:
+        await callback.answer("✅ عادی شد")
+
+
+@dp.callback_query(F.data.startswith("claim:"))
+async def claim_followup(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, obj_id = callback.data.split(":")
+    obj_id = int(obj_id)
+    model = Property if kind == "p" else Client
+    async with SessionLocal() as session:
+        user = await get_user(
+            session, callback.from_user.id, callback.from_user.full_name
+        )
+        # Atomic: only succeeds if nobody has claimed it yet.
+        result = await session.execute(
+            sa_update(model)
+            .where(
+                model.id == obj_id,
+                model.follow_up_user_id.is_(None),
+            )
+            .values(follow_up_user_id=user.id)
+        )
+        await session.commit()
+        won = (result.rowcount or 0) == 1
+        holder_id = None
+        if not won:
+            obj = await load_obj(session, kind, obj_id)
+            holder_id = obj.follow_up_user_id if obj else None
+        names = await user_name_map(session, [holder_id])
+        if won:
+            await add_activity(
+                session, user.id, "پیگیری",
+                "مسئول پیگیری شد",
+                property_id=obj_id if kind == "p" else 0,
+                client_id=obj_id if kind == "c" else 0,
+            )
+
+    view_cb = f"popen:{obj_id}" if kind == "p" else f"copen:{obj_id}"
+    if won:
+        who = user.name or callback.from_user.full_name
+        suffix = f"\n\n✅ پیگیری: {who}"
+        await callback.answer(
+            "✅ تو مسئول پیگیری شدی.", show_alert=True
+        )
+    elif holder_id == user.id:
+        await callback.answer(
+            "این مورد قبلاً به نام خودت ثبت شده.", show_alert=True
+        )
+        return
+    else:
+        who = names.get(holder_id, "یک مشاور")
+        suffix = f"\n\n📌 پیگیری قبلاً توسط {who} برداشته شده."
+        await callback.answer(
+            f"این مورد را {who} برداشته است.", show_alert=True
+        )
+    try:
+        await callback.message.edit_text(
+            (callback.message.text or "") + suffix,
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(text="مشاهده", callback_data=view_cb)
+            ]])
+        )
+    except Exception:
+        pass
+
+
+# =========================================================
+# FILE DETAIL (summary + separate sections)
+# =========================================================
+
+def floor_text(p):
+    if p.floor_label:
+        return p.floor_label
+    return f"{p.unit_floor} از {p.floors}"
+
+
+async def send_property_detail(target, prop_id, edit=False):
+    async with SessionLocal() as session:
+        prop = await load_obj(session, "p", prop_id)
+        if not prop:
+            await target.answer("فایل پیدا نشد.")
+            return
+        names = await user_name_map(
+            session, [prop.owner_user_id, prop.follow_up_user_id]
+        )
+    flag = "🚨 " if prop.is_urgent else ""
+    lines = [
+        f"{flag}🏠 فایل {prop.code}",
+        f"{env_title(prop.deal_type)} | {ownership_text(prop)}",
+        f"📍 {prop.area}",
+        f"📐 {money(prop.sqm)} متر | 🛏 {prop.bedrooms} خواب",
+        f"💰 {prop_price_text(prop)}",
+        f"📊 {prop.status}",
+        f"👤 مسئول: {names.get(prop.owner_user_id, '—')}",
+    ]
+    if prop.is_urgent and prop.follow_up_user_id:
+        lines.append(
+            f"📌 پیگیری: {names.get(prop.follow_up_user_id, '—')}"
+        )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="📋 اطلاعات ملک",
+                callback_data=f"ps:{prop.id}:info"),
+            InlineKeyboardButton(
+                text="💰 قیمت و شرایط",
+                callback_data=f"ps:{prop.id}:price"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📸 تصاویر", callback_data=f"pimg:{prop.id}"),
+            InlineKeyboardButton(
+                text="👤 مالک / مسئول",
+                callback_data=f"ps:{prop.id}:owner"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="📍 موقعیت", callback_data=f"ps:{prop.id}:loc"),
+            InlineKeyboardButton(
+                text="📝 توضیحات", callback_data=f"ps:{prop.id}:desc"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎯 مشتری‌های پیشنهادی",
+                callback_data=f"mc:{prop.id}:1:0"),
+            InlineKeyboardButton(
+                text="📞 فعالیت‌ها و پیگیری‌ها",
+                callback_data=f"pact:{prop.id}:1"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ عادی کردن" if prop.is_urgent
+                else "🚨 فوری کردن",
+                callback_data=f"urg:p:{prop.id}"),
+            InlineKeyboardButton(
+                text="🌐 عمومی کردن"
+                if ownership_text(prop) == "👤 شخصی"
+                else "👤 شخصی کردن",
+                callback_data=f"own:p:{prop.id}"),
+        ],
+    ]
+    if prop.is_urgent and not prop.follow_up_user_id:
+        rows.append([InlineKeyboardButton(
+            text="📌 من پیگیری می‌کنم",
+            callback_data=f"claim:p:{prop.id}")])
+    rows.append([
+        InlineKeyboardButton(
+            text="✏️ ویرایش", callback_data=f"edit:{prop.id}"),
+        InlineKeyboardButton(
+            text="🔄 وضعیت", callback_data=f"status:{prop.id}"),
+    ])
+    rows.append([InlineKeyboardButton(
+        text="🗑 حذف فایل", callback_data=f"deleteprop:{prop.id}")])
+    await show(
+        target, "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=edit
+    )
+
+
+@dp.callback_query(F.data.startswith("ps:"))
+async def property_section(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, pid, sec = callback.data.split(":")
+    async with SessionLocal() as session:
+        p = await load_obj(session, "p", int(pid))
+        if not p:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        names = await user_name_map(
+            session, [p.owner_user_id, p.follow_up_user_id]
+        )
+    extra = []
+    if sec == "info":
+        text = (
+            f"📋 اطلاعات ملک {p.code}\n\n"
+            f"🏢 نوع: {p.property_type}\n"
+            f"📐 متراژ: {money(p.sqm)}\n"
+            f"🛏 خواب: {p.bedrooms}\n"
+            f"🏠 طبقه: {floor_text(p)}\n"
+            f"🚪 واحد در طبقه: {p.units_per_floor}\n"
+            f"🛗 آسانسور: {p.elevator or '—'}\n"
+            f"🚗 پارکینگ: {p.parking or '—'}"
+            f"{(' (' + p.parking_type + ')') if p.parking_type else ''}\n"
+            f"📦 انباری: {p.storage or '—'}\n"
+            f"📄 سند: {p.document_type or '—'}"
+        )
+    elif sec == "price":
+        if p.deal_type == ENV_RENT:
+            text = (
+                f"💰 شرایط اجاره {p.code}\n\n"
+                f"نوع: {p.rent_type or '—'}\n"
+                f"رهن: {money(p.deposit)}\n"
+                f"اجاره: {money(p.rent)}\n"
+                f"تبدیل رهن/اجاره: {p.convertible or '—'}\n"
+                f"مدت قرارداد: {p.lease_term or '—'}\n"
+                f"وضعیت سکونت: {p.tenant or '—'}\n"
+                f"تاریخ تخلیه: {p.vacancy_date or '—'}"
+            )
+        else:
+            text = (
+                f"💰 قیمت {p.code}\n\n"
+                f"قیمت: {money(p.price)}\n"
+                f"وضعیت سکونت: {p.tenant or '—'}\n"
+                f"تاریخ تخلیه: {p.vacancy_date or '—'}\n"
+                f"ارزش معامله: {money(p.transaction_value)}"
+            )
+    elif sec == "owner":
+        text = (
+            f"👤 مالک / مسئول {p.code}\n\n"
+            f"مالک: {p.owner_name or '—'}\n"
+            f"📞 تلفن: {p.owner_phone or '—'}\n"
+            f"مسئول فایل: {names.get(p.owner_user_id, '—')}\n"
+            f"نوع مالکیت: {ownership_text(p)}\n"
+            f"مسئول پیگیری: {names.get(p.follow_up_user_id, '—')}"
+        )
+        extra.append([InlineKeyboardButton(
+            text="📂 فایل‌های همین مالک",
+            callback_data=f"owner:{p.id}")])
+    elif sec == "loc":
+        text = (
+            f"📍 موقعیت {p.code}\n\n"
+            f"منطقه: {p.area}\n"
+            f"آدرس: {p.address or '—'}"
+        )
+    else:
+        text = f"📝 توضیحات {p.code}\n\n{p.description or '—'}"
+    extra.append([InlineKeyboardButton(
+        text="⬅️ بازگشت به فایل", callback_data=f"popen:{p.id}")])
+    await callback.message.answer(
+        text, reply_markup=InlineKeyboardMarkup(inline_keyboard=extra)
+    )
+    await callback.answer()
+
+
+# ---------------- photos: album + manager ----------------
+
+async def send_photo_manager(target, prop_id):
+    async with SessionLocal() as session:
+        photos = (await session.execute(
+            select(PropertyPhoto)
+            .where(PropertyPhoto.property_id == prop_id)
+            .order_by(PropertyPhoto.created_at, PropertyPhoto.id)
+        )).scalars().all()
+    rows = []
+    for i, ph in enumerate(photos, start=1):
+        rows.append([
+            InlineKeyboardButton(
+                text=f"🗑 حذف {i}", callback_data=f"pd:{ph.id}"),
+            InlineKeyboardButton(
+                text=f"⭐ اصلی {i}", callback_data=f"pm:{ph.id}"),
+            InlineKeyboardButton(
+                text=f"🔄 جایگزین {i}", callback_data=f"pr:{ph.id}"),
+        ])
+    if len(photos) < MAX_PROPERTY_PHOTOS:
+        rows.append([InlineKeyboardButton(
+            text="➕ افزودن عکس", callback_data=f"photos:{prop_id}")])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ بازگشت به فایل", callback_data=f"popen:{prop_id}")])
+    await target.answer(
+        f"📸 مدیریت تصاویر ({len(photos)}/{MAX_PROPERTY_PHOTOS})\n"
+        f"عکس شمارهٔ ۱ تصویر اصلی است.",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+    )
+    return len(photos)
+
+
+@dp.callback_query(F.data.startswith("pimg:"))
+async def property_images(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    prop_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        photos = (await session.execute(
+            select(PropertyPhoto)
+            .where(PropertyPhoto.property_id == prop_id)
+            .order_by(PropertyPhoto.created_at, PropertyPhoto.id)
+        )).scalars().all()
+    if photos:
+        media = [
+            InputMediaPhoto(media=p.file_id)
+            for p in photos[:MAX_PROPERTY_PHOTOS]
+        ]
+        try:
+            if len(media) == 1:
+                await bot.send_photo(
+                    callback.message.chat.id, media[0].media
+                )
+            else:
+                await bot.send_media_group(
+                    callback.message.chat.id, media
+                )
+        except Exception as exc:
+            print("SEND PHOTOS ERROR:", exc)
+    await send_photo_manager(callback.message, prop_id)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("pd:"))
+async def photo_delete(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    photo_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        ph = (await session.execute(
+            select(PropertyPhoto).where(PropertyPhoto.id == photo_id)
+        )).scalar_one_or_none()
+        if not ph:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        prop_id = ph.property_id
+        await session.delete(ph)
+        await session.commit()
+    await callback.answer("🗑 حذف شد")
+    await send_photo_manager(callback.message, prop_id)
+
+
+@dp.callback_query(F.data.startswith("pm:"))
+async def photo_make_main(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    photo_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        ph = (await session.execute(
+            select(PropertyPhoto).where(PropertyPhoto.id == photo_id)
+        )).scalar_one_or_none()
+        if not ph:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        earliest = await session.scalar(
+            select(func.min(PropertyPhoto.created_at)).where(
+                PropertyPhoto.property_id == ph.property_id
+            )
+        )
+        ph.created_at = (earliest or datetime.utcnow()) - timedelta(
+            seconds=1
+        )
+        prop_id = ph.property_id
+        await session.commit()
+    await callback.answer("⭐ تصویر اصلی شد")
+    await send_photo_manager(callback.message, prop_id)
+
+
+@dp.callback_query(F.data.startswith("pr:"))
+async def photo_replace_start(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+    photo_id = int(callback.data.split(":")[1])
+    await state.clear()
+    await state.update_data(photo_id=photo_id)
+    await state.set_state(ReplacePhotoForm.photo)
+    await callback.message.answer(
+        "📷 عکس جدید را بفرست (برای انصراف /start بزن)."
+    )
+    await callback.answer()
+
+
+@dp.message(ReplacePhotoForm.photo, F.photo)
+async def photo_replace_save(message: Message, state: FSMContext):
+    data = await state.get_data()
+    async with SessionLocal() as session:
+        ph = (await session.execute(
+            select(PropertyPhoto).where(
+                PropertyPhoto.id == data.get("photo_id")
+            )
+        )).scalar_one_or_none()
+        if not ph:
+            await state.clear()
+            await message.answer("عکس پیدا نشد.")
+            return
+        ph.file_id = message.photo[-1].file_id
+        prop_id = ph.property_id
+        user = await get_user(
+            session, message.from_user.id, message.from_user.full_name
+        )
+        await add_activity(
+            session, user.id, "اصلاح فایل", "عکس جایگزین شد",
+            property_id=prop_id
+        )
+        await session.commit()
+    await state.clear()
+    await message.answer(
+        "✅ عکس جایگزین شد.",
+        reply_markup=env_main_menu(message.from_user.id)
+    )
+    await send_photo_manager(message, prop_id)
+
+
+@dp.message(ReplacePhotoForm.photo)
+async def photo_replace_wrong(message: Message):
+    await message.answer("لطفاً یک عکس بفرست.")
+
+
+# ---------------- activities of one file / client ----------------
+
+async def send_entity_activities(target, kind, obj_id, page, edit=False):
+    col = Activity.property_id if kind == "p" else Activity.client_id
+    async with SessionLocal() as session:
+        total = await session.scalar(
+            select(func.count(Activity.id)).where(col == obj_id)
+        ) or 0
+        total_pages = max(
+            1, (total + ACTIVITY_PAGE_SIZE - 1) // ACTIVITY_PAGE_SIZE
+        )
+        page = max(1, min(page, total_pages))
+        result = await session.execute(
+            select(Activity, User.name)
+            .outerjoin(User, User.id == Activity.user_id)
+            .where(col == obj_id)
+            .order_by(Activity.created_at.desc())
+            .limit(ACTIVITY_PAGE_SIZE)
+            .offset((page - 1) * ACTIVITY_PAGE_SIZE)
+        )
+        rows_data = result.all()
+    lines = [f"📞 فعالیت‌ها — صفحه {page} از {total_pages} ({total})\n"]
+    if not rows_data:
+        lines.append("فعالیتی ثبت نشده.")
+    for act, uname in rows_data:
+        note = (act.note or "")[:40]
+        lines.append(
+            f"{tehran_time(act.created_at)} | {uname or '—'} | "
+            f"{act.activity_type}"
+            f"{(' | ' + note) if note else ''}"
+        )
+    cb = "pact" if kind == "p" else "cact"
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(
+            text="‹ قبلی", callback_data=f"{cb}:{obj_id}:{page - 1}"))
+    nav.append(InlineKeyboardButton(
+        text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(
+            text="بعدی ›", callback_data=f"{cb}:{obj_id}:{page + 1}"))
+    rows = [nav]
+    if kind == "p":
+        rows.append([
+            InlineKeyboardButton(
+                text="🕒 ثبت رویداد", callback_data=f"event:{obj_id}"),
+            InlineKeyboardButton(
+                text="📜 تاریخچه", callback_data=f"history:{obj_id}"),
+        ])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ بازگشت",
+        callback_data=(
+            f"popen:{obj_id}" if kind == "p" else f"copen:{obj_id}"
+        )
+    )])
+    await show(
+        target, "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=edit
+    )
+
+
+@dp.callback_query(F.data.startswith("pact:"))
+async def property_activities(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, pid, page = callback.data.split(":")
+    await send_entity_activities(
+        callback.message, "p", int(pid), int(page),
+        edit=(int(page) != 1 or (callback.message.text or "").startswith("📞"))
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("cact:"))
+async def client_activities(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, cid, page = callback.data.split(":")
+    await send_entity_activities(
+        callback.message, "c", int(cid), int(page),
+        edit=(int(page) != 1 or (callback.message.text or "").startswith("📞"))
+    )
+    await callback.answer()
+
+
+# =========================================================
+# CLIENT DETAIL (summary + sections + preferences)
+# =========================================================
+
+async def send_client_detail(target, client_id, edit=False):
+    async with SessionLocal() as session:
+        c = await load_obj(session, "c", client_id)
+        if not c:
+            await target.answer("مشتری پیدا نشد.")
+            return
+        names = await user_name_map(
+            session, [c.owner_user_id, c.follow_up_user_id]
+        )
+    flag = "🚨 " if c.is_urgent else ""
+    lines = [
+        f"{flag}👤 {c.name}",
+        f"{env_title(c.deal_type)} | {ownership_text(c)}",
+        f"📍 {c.area}",
+        f"💰 {client_budget_text(c)}",
+        f"📊 {c.status}",
+        f"👤 مسئول: {names.get(c.owner_user_id, '—')}",
+    ]
+    if c.is_urgent and c.follow_up_user_id:
+        lines.append(
+            f"📌 پیگیری: {names.get(c.follow_up_user_id, '—')}"
+        )
+    rows = [
+        [
+            InlineKeyboardButton(
+                text="📋 اطلاعات", callback_data=f"cs:{c.id}:info"),
+            InlineKeyboardButton(
+                text="💰 بودجه و شرایط",
+                callback_data=f"cs:{c.id}:budget"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="⚙️ ترجیحات", callback_data=f"cpref:{c.id}"),
+            InlineKeyboardButton(
+                text="👤 مسئول مشتری",
+                callback_data=f"cs:{c.id}:owner"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎯 فایل‌های مناسب",
+                callback_data=f"mf:{c.id}:1:0"),
+            InlineKeyboardButton(
+                text="📞 فعالیت‌ها", callback_data=f"cact:{c.id}:1"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="✅ عادی کردن" if c.is_urgent else "🚨 فوری کردن",
+                callback_data=f"urg:c:{c.id}"),
+            InlineKeyboardButton(
+                text="🌐 عمومی کردن"
+                if ownership_text(c) == "👤 شخصی"
+                else "👤 شخصی کردن",
+                callback_data=f"own:c:{c.id}"),
+        ],
+    ]
+    if c.is_urgent and not c.follow_up_user_id:
+        rows.append([InlineKeyboardButton(
+            text="📌 من پیگیری می‌کنم",
+            callback_data=f"claim:c:{c.id}")])
+    rows.append([
+        InlineKeyboardButton(
+            text="✏️ اصلاح اطلاعات",
+            callback_data=f"clientedit:{c.id}"),
+        InlineKeyboardButton(
+            text="🔄 تغییر وضعیت",
+            callback_data=f"clientstatus:{c.id}"),
+    ])
+    rows.append([InlineKeyboardButton(
+        text="🗑 حذف مشتری", callback_data=f"deleteclient:{c.id}")])
+    await show(
+        target, "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=edit
+    )
+
+
+def floor_pref_text(c):
+    if (c.floor_pref or PREF_ANY) == PREF_ANY:
+        return "مهم نیست"
+    lo, hi = c.floor_min, c.floor_max
+    if lo == LAST_FLOOR_SENTINEL:
+        return "آخرین طبقه"
+    if lo is None and hi is None:
+        return "بازه تعیین نشده"
+    if lo == hi:
+        return f"طبقه {lo}"
+    return f"طبقه {lo} تا {hi}"
+
+
+@dp.callback_query(F.data.startswith("cs:"))
+async def client_section(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, cid, sec = callback.data.split(":")
+    async with SessionLocal() as session:
+        c = await load_obj(session, "c", int(cid))
+        if not c:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        names = await user_name_map(
+            session, [c.owner_user_id, c.follow_up_user_id]
+        )
+    if sec == "info":
+        text = (
+            f"📋 {c.name}\n\n"
+            f"📞 تلفن: {c.phone or '—'}\n"
+            f"📍 منطقه: {c.area}\n"
+            f"📐 متراژ: {money(c.min_sqm)} تا {money(c.max_sqm)}\n"
+            f"🏢 نوع ملک: {c.property_type}\n"
+            f"📝 {c.description or '—'}"
+        )
+    elif sec == "budget":
+        text = (
+            f"💰 بودجه {c.name} — {env_title(c.deal_type)}\n\n"
+            f"{client_budget_text(c)}"
+        )
+    else:
+        text = (
+            f"👤 مسئول {c.name}\n\n"
+            f"مسئول مشتری: {names.get(c.owner_user_id, '—')}\n"
+            f"نوع مالکیت: {ownership_text(c)}\n"
+            f"مسئول پیگیری: {names.get(c.follow_up_user_id, '—')}"
+        )
+    await callback.message.answer(
+        text,
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="⬅️ بازگشت به مشتری",
+                callback_data=f"copen:{c.id}")
+        ]])
+    )
+    await callback.answer()
+
+
+async def send_client_prefs(target, client_id, edit=False):
+    async with SessionLocal() as session:
+        c = await load_obj(session, "c", client_id)
+    if not c:
+        await target.answer("مشتری پیدا نشد.")
+        return
+    rows = [
+        [InlineKeyboardButton(
+            text=f"🛗 آسانسور: {pref_icon(c.elevator_pref)} "
+                 f"{c.elevator_pref}",
+            callback_data=f"cpc:{c.id}:e")],
+        [InlineKeyboardButton(
+            text=f"🚗 پارکینگ: {pref_icon(c.parking_pref)} "
+                 f"{c.parking_pref}",
+            callback_data=f"cpc:{c.id}:p")],
+        [InlineKeyboardButton(
+            text=f"📦 انباری: {pref_icon(c.storage_pref)} "
+                 f"{c.storage_pref}",
+            callback_data=f"cpc:{c.id}:s")],
+        [InlineKeyboardButton(
+            text=f"🏢 طبقه: {pref_icon(c.floor_pref)} "
+                 f"{floor_pref_text(c)}",
+            callback_data=f"cpc:{c.id}:f")],
+        [InlineKeyboardButton(
+            text="✏️ تعیین طبقه / بازه",
+            callback_data=f"cfl:{c.id}")],
+    ]
+    if c.deal_type == ENV_RENT:
+        rows.append([InlineKeyboardButton(
+            text="💵 سقف رهن و اجاره", callback_data=f"crb:{c.id}")])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ بازگشت به مشتری", callback_data=f"copen:{c.id}")])
+    await show(
+        target,
+        f"⚙️ ترجیحات {c.name}\n\n"
+        f"🔴 الزامی | 🟡 ترجیحی | ⚪ مهم نیست\n"
+        f"با لمس هر مورد حالت عوض می‌شود.",
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=edit
+    )
+
+
+@dp.callback_query(F.data.startswith("cpref:"))
+async def client_prefs_open(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    await send_client_prefs(
+        callback.message, int(callback.data.split(":")[1])
+    )
+    await callback.answer()
+
+
+PREF_FIELDS = {
+    "e": "elevator_pref",
+    "p": "parking_pref",
+    "s": "storage_pref",
+    "f": "floor_pref",
+}
+
+
+@dp.callback_query(F.data.startswith("cpc:"))
+async def client_pref_cycle(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, cid, key = callback.data.split(":")
+    field = PREF_FIELDS.get(key)
+    if not field:
+        await callback.answer("نامعتبر", show_alert=True)
+        return
+    async with SessionLocal() as session:
+        c = await load_obj(session, "c", int(cid))
+        if not c:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        current = getattr(c, field) or PREF_ANY
+        idx = PREF_CYCLE.index(current) if current in PREF_CYCLE else 2
+        new_value = PREF_CYCLE[(idx + 1) % len(PREF_CYCLE)]
+        setattr(c, field, new_value)
+        if field == "floor_pref" and new_value == PREF_ANY:
+            c.floor_min = None
+            c.floor_max = None
+        await session.commit()
+    await send_client_prefs(callback.message, int(cid), edit=True)
+    await callback.answer()
+
+
+FLOOR_WORDS = {
+    "زیرزمین": -1,
+    "همکف": 0,
+}
+
+
+def parse_floor_range(text):
+    t = normalize_digits(text or "").strip()
+    if t in ("مهم نیست", "مهم نیست."):
+        return "any", None, None
+    if "آخرین" in t:
+        return "ok", LAST_FLOOR_SENTINEL, LAST_FLOOR_SENTINEL
+    for sep in ("تا", "-", "–", "،", ","):
+        if sep in t:
+            left, right = [x.strip() for x in t.split(sep, 1)]
+            a = FLOOR_WORDS.get(left)
+            b = FLOOR_WORDS.get(right)
+            try:
+                a = a if a is not None else int(left)
+                b = b if b is not None else int(right)
+            except Exception:
+                return "bad", None, None
+            return "ok", min(a, b), max(a, b)
+    if t in FLOOR_WORDS:
+        return "ok", FLOOR_WORDS[t], FLOOR_WORDS[t]
+    try:
+        n = int(t)
+        return "ok", n, n
+    except Exception:
+        return "bad", None, None
+
+
+@dp.callback_query(F.data.startswith("cfl:"))
+async def client_floor_start(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+    await state.clear()
+    await state.update_data(client_id=int(callback.data.split(":")[1]))
+    await state.set_state(FloorRangeForm.value)
+    await callback.message.answer(
+        "🏢 طبقه را بنویس:\n"
+        "مثال: 3 ، 2 تا 4 ، همکف ، زیرزمین ، آخرین طبقه ، مهم نیست"
+    )
+    await callback.answer()
+
+
+@dp.message(FloorRangeForm.value)
+async def client_floor_save(message: Message, state: FSMContext):
+    kind, lo, hi = parse_floor_range(message.text)
+    if kind == "bad":
+        await message.answer("نامعتبر. مثال: 2 تا 4 یا همکف یا مهم نیست")
+        return
+    data = await state.get_data()
+    cid = data.get("client_id")
+    async with SessionLocal() as session:
+        c = await load_obj(session, "c", cid)
+        if not c:
+            await state.clear()
+            await message.answer("مشتری پیدا نشد.")
+            return
+        if kind == "any":
+            c.floor_pref = PREF_ANY
+            c.floor_min = None
+            c.floor_max = None
+        else:
+            c.floor_min = lo
+            c.floor_max = hi
+            if (c.floor_pref or PREF_ANY) == PREF_ANY:
+                c.floor_pref = PREF_PREFERRED
+        await session.commit()
+    await state.clear()
+    await message.answer(
+        "✅ ثبت شد.", reply_markup=env_main_menu(message.from_user.id)
+    )
+    await send_client_prefs(message, cid)
+
+
+@dp.callback_query(F.data.startswith("crb:"))
+async def client_rent_budget_start(
+    callback: CallbackQuery, state: FSMContext
+):
+    if not await callback_access_required(callback):
+        return
+    await state.clear()
+    await state.update_data(client_id=int(callback.data.split(":")[1]))
+    await state.set_state(RentBudgetForm.deposit)
+    await callback.message.answer(
+        "💵 سقف رهن را بنویس (برای بدون محدودیت 0):"
+    )
+    await callback.answer()
+
+
+@dp.message(RentBudgetForm.deposit)
+async def client_rent_budget_deposit(message: Message, state: FSMContext):
+    value = number(message.text, None)
+    if value is None or value < 0:
+        await message.answer("عدد معتبر وارد کن.")
+        return
+    await state.update_data(max_deposit=value)
+    await state.set_state(RentBudgetForm.rent)
+    await message.answer("💵 سقف اجاره ماهانه را بنویس (یا 0):")
+
+
+@dp.message(RentBudgetForm.rent)
+async def client_rent_budget_rent(message: Message, state: FSMContext):
+    value = number(message.text, None)
+    if value is None or value < 0:
+        await message.answer("عدد معتبر وارد کن.")
+        return
+    data = await state.get_data()
+    cid = data.get("client_id")
+    async with SessionLocal() as session:
+        await session.execute(
+            sa_update(Client)
+            .where(Client.id == cid)
+            .values(
+                max_deposit=data.get("max_deposit", 0),
+                max_rent=value,
+            )
+        )
+        await session.commit()
+    await state.clear()
+    await message.answer(
+        "✅ ثبت شد.", reply_markup=env_main_menu(message.from_user.id)
+    )
+    await send_client_prefs(message, cid)
+
+
+# =========================================================
+# MATCHING ENGINE (pure functions)
+# =========================================================
+
+W_BUDGET = 30
+W_AREA = 20
+W_SQM = 20
+W_TYPE = 10
+W_ELEVATOR = 7
+W_PARKING = 7
+W_STORAGE = 3
+W_FLOOR = 3
+
+
+def _has_feature(value):
+    return str(value or "").strip() == "دارد"
+
+
+def _limit_fit(value, limit):
+    """1 = within limit, 0.5 = up to 10% above, 0 = more."""
+    value = value or 0
+    if limit is None or limit <= 0:
+        return 1.0
+    if value <= limit:
+        return 1.0
+    if (value - limit) / limit <= 0.10:
+        return 0.5
+    return 0.0
+
+
+def property_floor_value(p):
+    label = (p.floor_label or "").strip()
+    if label == "زیرزمین":
+        return -1
+    if label == "همکف":
+        return 0
+    return p.unit_floor or 0
+
+
+def property_is_last_floor(p):
+    if (p.floor_label or "").strip() == "آخرین طبقه":
+        return True
+    return bool(p.floors) and p.unit_floor == p.floors
+
+
+def match_score(client, prop):
+    """
+    Returns None if deal types differ, else a dict:
+      score (0-100), eligible (no missing REQUIRED feature),
+      reasons (list of short strings), missing (list of names).
+    "مهم نیست" features are excluded from the maximum score,
+    so they can never reduce it.
+    """
+    if (client.deal_type or ENV_SALE) != (prop.deal_type or ENV_SALE):
+        return None
+
+    earned = 0.0
+    possible = 0.0
+    reasons = []
+    missing = []
+
+    # ---- budget ----
+    if (prop.deal_type or ENV_SALE) == ENV_RENT:
+        dep_lim = client.max_deposit or 0
+        rent_lim = client.max_rent or 0
+        if dep_lim <= 0 and rent_lim <= 0:
+            reasons.append("⚪ بودجه مشخص نشده")
+        else:
+            possible += W_BUDGET
+            fit = (
+                _limit_fit(prop.deposit, dep_lim)
+                + _limit_fit(prop.rent, rent_lim)
+            ) / 2
+            earned += W_BUDGET * fit
+            if fit == 1:
+                reasons.append("✅ بودجه")
+            elif fit > 0:
+                reasons.append("⚠️ بودجه کمی بالاتر")
+            else:
+                reasons.append("❌ بودجه")
+    else:
+        bmax = client.max_budget or 0
+        bmin = client.min_budget or 0
+        if bmax <= 0 and bmin <= 0:
+            reasons.append("⚪ بودجه مشخص نشده")
+        else:
+            possible += W_BUDGET
+            price = prop.price or 0
+            fit = _limit_fit(price, bmax)
+            if fit == 1 and bmin > 0 and price < bmin:
+                earned += W_BUDGET * 0.75
+                reasons.append("⚠️ قیمت کمتر از حداقل بودجه")
+            else:
+                earned += W_BUDGET * fit
+                if fit == 1:
+                    reasons.append("✅ بودجه")
+                elif fit > 0:
+                    reasons.append("⚠️ تا ۱۰٪ بالاتر از سقف بودجه")
+                else:
+                    reasons.append("❌ بودجه")
+
+    # ---- area ----
+    if not client.area or client.area == ALL_AREAS:
+        reasons.append("⚪ منطقه مهم نیست")
+    else:
+        possible += W_AREA
+        if client.area == prop.area:
+            earned += W_AREA
+            reasons.append("✅ منطقه")
+        else:
+            reasons.append("❌ منطقه")
+
+    # ---- area size ----
+    lo = client.min_sqm or 0
+    hi = client.max_sqm or 0
+    if lo <= 0 and hi <= 0:
+        reasons.append("⚪ متراژ مهم نیست")
+    else:
+        possible += W_SQM
+        sqm = prop.sqm or 0
+        upper = hi if hi > 0 else float("inf")
+        if lo <= sqm <= upper:
+            earned += W_SQM
+            reasons.append("✅ متراژ")
+        else:
+            ref = hi if (hi > 0 and sqm > hi) else lo
+            if ref > 0 and abs(sqm - ref) / ref <= 0.10:
+                earned += W_SQM * 0.5
+                reasons.append("⚠️ متراژ نزدیک")
+            else:
+                reasons.append("❌ متراژ")
+
+    # ---- property type ----
+    if not client.property_type or client.property_type == "سایر":
+        reasons.append("⚪ نوع ملک مهم نیست")
+    else:
+        possible += W_TYPE
+        if client.property_type == prop.property_type:
+            earned += W_TYPE
+            reasons.append("✅ نوع ملک")
+        else:
+            reasons.append("❌ نوع ملک")
+
+    # ---- three-state features ----
+    def feature(label, pref, has, weight):
+        nonlocal earned, possible
+        pref = pref or PREF_ANY
+        if pref == PREF_ANY:
+            reasons.append(f"⚪ {label} مهم نیست")
+            return
+        possible += weight
+        if has:
+            earned += weight
+            reasons.append(f"✅ {label}")
+        elif pref == PREF_REQUIRED:
+            missing.append(label)
+            reasons.append(f"🔴 {label} الزامی بود ولی فایل ندارد")
+        else:
+            reasons.append(
+                f"⚠️ {label} ترجیحی بود ولی فایل ندارد"
+            )
+
+    feature(
+        "آسانسور", client.elevator_pref,
+        _has_feature(prop.elevator), W_ELEVATOR
+    )
+    feature(
+        "پارکینگ", client.parking_pref,
+        _has_feature(prop.parking), W_PARKING
+    )
+    feature(
+        "انباری", client.storage_pref,
+        _has_feature(prop.storage), W_STORAGE
+    )
+
+    # ---- floor ----
+    fpref = client.floor_pref or PREF_ANY
+    fmin, fmax = client.floor_min, client.floor_max
+    if fpref == PREF_ANY or (fmin is None and fmax is None):
+        reasons.append("⚪ طبقه مهم نیست")
+    else:
+        if fmin == LAST_FLOOR_SENTINEL:
+            ok = property_is_last_floor(prop)
+        else:
+            val = property_floor_value(prop)
+            ok = (
+                (fmin is None or val >= fmin)
+                and (fmax is None or val <= fmax)
+            )
+        feature("طبقه", fpref, ok, W_FLOOR)
+
+    score = round(100 * earned / possible) if possible > 0 else 0
+    return {
+        "score": score,
+        "eligible": not missing,
+        "reasons": reasons,
+        "missing": missing,
+    }
+
+
+# =========================================================
+# MATCHING UI (both directions, paginated, with reasons)
+# =========================================================
+
+def short_reasons(reasons):
+    return " | ".join(reasons)
+
+
+async def send_match_page(
+    target, direction, ref_id, page, tg_user, weak, edit=False
+):
+    """
+    direction 'f': client -> files   (mf:{client}:{page}:{weak})
+    direction 'c': file   -> clients (mc:{file}:{page}:{weak})
+    weak=1 shows candidates missing a REQUIRED feature.
+    """
+    tg_id = tg_user.id
+    async with SessionLocal() as session:
+        user = await get_user(session, tg_id, tg_user.full_name)
+        scored = []
+        if direction == "f":
+            client = await load_obj(session, "c", ref_id)
+            if not client:
+                await target.answer("مشتری پیدا نشد.")
+                return
+            conds = [
+                Property.deal_type == (client.deal_type or ENV_SALE),
+                active_property_filter(),
+            ]
+            vis = vis_filter(Property, user, tg_id)
+            if vis is not None:
+                conds.append(vis)
+            candidates = (await session.execute(
+                select(Property).where(*conds)
+            )).scalars().all()
+            visited = set((await session.execute(
+                select(Visit.property_id).where(
+                    Visit.client_id == client.id)
+            )).scalars().all())
+            for p in candidates:
+                m = match_score(client, p)
+                if m:
+                    scored.append((m, p, p.id in visited))
+            head = f"🎯 فایل‌های مناسب {client.name}"
+        else:
+            prop = await load_obj(session, "p", ref_id)
+            if not prop:
+                await target.answer("فایل پیدا نشد.")
+                return
+            conds = [
+                Client.deal_type == (prop.deal_type or ENV_SALE),
+                active_client_filter(),
+            ]
+            vis = vis_filter(Client, user, tg_id)
+            if vis is not None:
+                conds.append(vis)
+            candidates = (await session.execute(
+                select(Client).where(*conds)
+            )).scalars().all()
+            visited = set((await session.execute(
+                select(Visit.client_id).where(
+                    Visit.property_id == prop.id)
+            )).scalars().all())
+            for c in candidates:
+                m = match_score(c, prop)
+                if m:
+                    scored.append((m, c, c.id in visited))
+            head = f"🎯 مشتری‌های مناسب فایل {prop.code}"
+
+    main_list = [
+        x for x in scored
+        if x[0]["eligible"] and x[0]["score"] >= MATCH_MIN_SCORE
+    ]
+    weak_list = [
+        x for x in scored
+        if not x[0]["eligible"] and x[0]["score"] >= MATCH_MIN_SCORE
+    ]
+    chosen = weak_list if weak else main_list
+    chosen.sort(key=lambda x: x[0]["score"], reverse=True)
+
+    total = len(chosen)
+    total_pages = max(1, (total + MATCH_PAGE_SIZE - 1) // MATCH_PAGE_SIZE)
+    page = max(1, min(page, total_pages))
+    part = chosen[(page - 1) * MATCH_PAGE_SIZE: page * MATCH_PAGE_SIZE]
+
+    title = head + (" — ⚠️ ناقص (الزامی را ندارند)" if weak else "")
+    lines = [title, f"صفحه {page} از {total_pages} — {total} مورد", ""]
+    if not part:
+        lines.append("موردی پیدا نشد.")
+    rows = []
+    for i, (m, obj, was_visited) in enumerate(part, start=1):
+        if direction == "f":
+            name = f"{obj.code} | {obj.area} | {prop_price_text(obj)}"
+            open_cb = f"popen:{obj.id}"
+        else:
+            name = f"{obj.name} | {obj.area}"
+            open_cb = f"copen:{obj.id}"
+        seen = " 👀" if was_visited else ""
+        lines.append(f"{i}) {name} — {m['score']}٪{seen}")
+        lines.append(short_reasons(m["reasons"]))
+        lines.append("")
+        rows.append([InlineKeyboardButton(
+            text=f"{i}) {name}"[:60], callback_data=open_cb
+        )])
+
+    prefix = "mf" if direction == "f" else "mc"
+    flag = 1 if weak else 0
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(
+            text="‹ قبلی",
+            callback_data=f"{prefix}:{ref_id}:{page - 1}:{flag}"))
+    nav.append(InlineKeyboardButton(
+        text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(
+            text="بعدی ›",
+            callback_data=f"{prefix}:{ref_id}:{page + 1}:{flag}"))
+    rows.append(nav)
+    if weak:
+        rows.append([InlineKeyboardButton(
+            text="⬅️ پیشنهادهای اصلی",
+            callback_data=f"{prefix}:{ref_id}:1:0")])
+    elif weak_list:
+        rows.append([InlineKeyboardButton(
+            text=f"⚠️ نزدیک ولی ناقص ({len(weak_list)})",
+            callback_data=f"{prefix}:{ref_id}:1:1")])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ بازگشت",
+        callback_data=(
+            f"copen:{ref_id}" if direction == "f"
+            else f"popen:{ref_id}"
+        )
+    )])
+    await show(
+        target, "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=edit
+    )
+
+
+@dp.callback_query(F.data.startswith("mf:"))
+async def match_files_for_client(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, ref, page, weak = callback.data.split(":")
+    await send_match_page(
+        callback.message, "f", int(ref), int(page),
+        callback.from_user, weak == "1",
+        edit=(callback.message.text or "").startswith("🎯")
+    )
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("mc:"))
+async def match_clients_for_file(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, ref, page, weak = callback.data.split(":")
+    await send_match_page(
+        callback.message, "c", int(ref), int(page),
+        callback.from_user, weak == "1",
+        edit=(callback.message.text or "").startswith("🎯")
+    )
+    await callback.answer()
+
+
+# ---------------- suggestions section ----------------
+
+@dp.message(F.text == "🎯 پیشنهادها")
+async def suggestions_menu(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not await require_env(message):
+        return
+    await state.clear()
+    await message.answer(
+        f"🎯 پیشنهادها — "
+        f"{env_title(current_env(message.from_user.id))}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🏠 فایل مناسب مشتری", callback_data="sg:c:1")],
+            [InlineKeyboardButton(
+                text="👤 مشتری مناسب فایل", callback_data="sg:p:1")],
+        ])
+    )
+
+
+@dp.callback_query(F.data.startswith("sg:"))
+async def suggestion_picker(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    _, kind, page = callback.data.split(":")
+    page = int(page)
+    tg = callback.from_user
+    env = current_env(tg.id)
+    model = Client if kind == "c" else Property
+    async with SessionLocal() as session:
+        user = await get_user(session, tg.id, tg.full_name)
+        conds = [
+            model.deal_type == env,
+            active_client_filter() if kind == "c"
+            else active_property_filter(),
+        ]
+        vis = vis_filter(model, user, tg.id)
+        if vis is not None:
+            conds.append(vis)
+        total = await session.scalar(
+            select(func.count(model.id)).where(*conds)
+        ) or 0
+        total_pages = max(
+            1, (total + LIST_PAGE_SIZE - 1) // LIST_PAGE_SIZE
+        )
+        page = max(1, min(page, total_pages))
+        items = (await session.execute(
+            select(model).where(*conds)
+            .order_by(model.is_urgent.desc(), model.id.desc())
+            .limit(LIST_PAGE_SIZE)
+            .offset((page - 1) * LIST_PAGE_SIZE)
+        )).scalars().all()
+    rows = []
+    for obj in items:
+        flag = "🚨 " if obj.is_urgent else ""
+        if kind == "c":
+            label = f"{flag}{obj.name} | {obj.area}"
+            cb = f"mf:{obj.id}:1:0"
+        else:
+            label = f"{flag}{obj.code} | {obj.area} | {money(obj.sqm)}م"
+            cb = f"mc:{obj.id}:1:0"
+        rows.append([InlineKeyboardButton(
+            text=label[:60], callback_data=cb)])
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(
+            text="‹ قبلی", callback_data=f"sg:{kind}:{page - 1}"))
+    nav.append(InlineKeyboardButton(
+        text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(
+            text="بعدی ›", callback_data=f"sg:{kind}:{page + 1}"))
+    rows.append(nav)
+    title = (
+        "👤 مشتری را انتخاب کن:" if kind == "c"
+        else "🏠 فایل را انتخاب کن:"
+    )
+    await show(
+        callback.message,
+        f"{title}\nصفحه {page} از {total_pages}",
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=True
+    )
+    await callback.answer()
+
+
+# =========================================================
+# URGENT SECTION
+# =========================================================
+
+@dp.message(F.text == "🚨 فوری")
+async def urgent_menu(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not await require_env(message):
+        return
+    await state.clear()
+    env = current_env(message.from_user.id)
+    async with SessionLocal() as session:
+        user = await get_user(
+            session, message.from_user.id, message.from_user.full_name
+        )
+        counts = {}
+        for kind, model in (("p", Property), ("c", Client)):
+            conds = [model.deal_type == env, model.is_urgent == 1]
+            conds.append(
+                active_property_filter() if kind == "p"
+                else active_client_filter()
+            )
+            vis = vis_filter(model, user, message.from_user.id)
+            if vis is not None:
+                conds.append(vis)
+            counts[kind] = await session.scalar(
+                select(func.count(model.id)).where(*conds)
+            ) or 0
+    await message.answer(
+        f"🚨 فوری — {env_title(env)}\n\n"
+        f"فایل‌های فوری: {counts['p']}\n"
+        f"مشتری‌های فوری: {counts['c']}",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(
+                text="🏠 فایل‌های فوری", callback_data="L:p:u:1")],
+            [InlineKeyboardButton(
+                text="👤 مشتری‌های فوری", callback_data="L:c:u:1")],
+        ])
+    )
+
+
+# =========================================================
+# ACTIVITIES: SUMMARY -> DETAILS (paginated, filtered)
+# =========================================================
+
+PERIODS = {
+    "t": ("امروز", 0),
+    "w": ("۷ روز اخیر", 7),
+    "m": ("۳۰ روز اخیر", 30),
+}
+PERIOD_ORDER = ["t", "w", "m"]
+
+
+def period_start(period):
+    start = day_start_utc()
+    days = PERIODS[period][1]
+    return start - timedelta(days=days)
+
+
+def activity_base(select_stmt, env):
+    return (
+        select_stmt
+        .select_from(Activity)
+        .outerjoin(User, User.id == Activity.user_id)
+        .outerjoin(Property, Property.id == Activity.property_id)
+        .outerjoin(Client, Client.id == Activity.client_id)
+    )
+
+
+def activity_env_cond(env):
+    return or_(
+        Property.deal_type == env,
+        Client.deal_type == env,
+        and_(Property.id.is_(None), Client.id.is_(None)),
+    )
+
+
+@dp.message(F.text == "📊 فعالیت‌ها")
+async def activities_home(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not await require_env(message):
+        return
+    await state.clear()
+    env = current_env(message.from_user.id)
+    start = day_start_utc()
+    async with SessionLocal() as session:
+        result = await session.execute(
+            activity_base(
+                select(User.name, func.count(Activity.id)), env
+            )
+            .where(Activity.created_at >= start, activity_env_cond(env))
+            .group_by(User.name)
+            .order_by(func.count(Activity.id).desc())
+        )
+        rows_data = result.all()
+    total = sum(r[1] for r in rows_data)
+    lines = [f"📊 فعالیت امروز — {env_title(env)}", ""]
+    if not rows_data:
+        lines.append("امروز فعالیتی ثبت نشده.")
+    for name, count in rows_data:
+        lines.append(f"{name or 'نامشخص'}: {count}")
+    lines += ["", f"مجموع: {total}"]
+
+    menu_rows = [
+        ["👀 ثبت بازدید", "📞 پیگیری"],
+        ["📊 KPI من"],
+    ]
+    if is_admin(message.from_user.id):
+        menu_rows[1].append("👥 KPI تیم")
+        menu_rows.append(["📝 آخرین فعالیت‌ها"])
+    menu_rows.append(["⬅️ بازگشت"])
+    await message.answer(
+        "\n".join(lines),
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text="جزئیات", callback_data="ad:t:0:1")
+        ]])
+    )
+    await message.answer(
+        "ابزارهای فعالیت 👇",
+        reply_markup=keyboard(menu_rows, include_cancel=False)
+    )
+
+
+@dp.message(F.text == "📝 آخرین فعالیت‌ها")
+async def latest_activities_v2(message: Message):
+    if not await access_required(message):
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ این بخش فقط برای مدیر سیستم است.")
+        return
+    if message.from_user.id not in USER_ENV:
+        USER_ENV[message.from_user.id] = ENV_SALE
+    await send_activity_details(
+        message, "w", 0, 1, message.from_user.id
+    )
+
+
+async def activity_types():
+    async with SessionLocal() as session:
+        result = await session.execute(
+            select(Activity.activity_type).distinct()
+        )
+        return sorted({r[0] for r in result.all() if r[0]})
+
+
+async def send_activity_details(
+    target, period, type_idx, page, tg_id, edit=False
+):
+    env = current_env(tg_id)
+    types = await activity_types()
+    type_name = types[type_idx - 1] if 0 < type_idx <= len(types) else None
+    start = period_start(period)
+    conds = [Activity.created_at >= start, activity_env_cond(env)]
+    if type_name:
+        conds.append(Activity.activity_type == type_name)
+
+    async with SessionLocal() as session:
+        total = await session.scalar(
+            activity_base(select(func.count(Activity.id)), env)
+            .where(*conds)
+        ) or 0
+        total_pages = max(
+            1, (total + ACTIVITY_PAGE_SIZE - 1) // ACTIVITY_PAGE_SIZE
+        )
+        page = max(1, min(page, total_pages))
+        result = await session.execute(
+            activity_base(select(Activity, User.name), env)
+            .where(*conds)
+            .order_by(Activity.created_at.desc())
+            .limit(ACTIVITY_PAGE_SIZE)
+            .offset((page - 1) * ACTIVITY_PAGE_SIZE)
+        )
+        rows_data = result.all()
+
+    lines = [
+        f"📊 جزئیات فعالیت — {env_title(env)}",
+        f"بازه: {PERIODS[period][0]} | نوع: {type_name or 'همه'}",
+        f"صفحه {page} از {total_pages} — {total} مورد",
+        "",
+    ]
+    if not rows_data:
+        lines.append("فعالیتی پیدا نشد.")
+    for act, uname in rows_data:
+        note = (act.note or "")[:40]
+        lines.append(
+            f"{tehran_time(act.created_at)} | {uname or '—'} | "
+            f"{act.activity_type}"
+            f"{(' | ' + note) if note else ''}"
+        )
+
+    next_period = PERIOD_ORDER[
+        (PERIOD_ORDER.index(period) + 1) % len(PERIOD_ORDER)
+    ]
+    next_type = (type_idx + 1) % (len(types) + 1)
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton(
+            text="‹ قبلی",
+            callback_data=f"ad:{period}:{type_idx}:{page - 1}"))
+    nav.append(InlineKeyboardButton(
+        text=f"{page}/{total_pages}", callback_data="noop"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton(
+            text="بعدی ›",
+            callback_data=f"ad:{period}:{type_idx}:{page + 1}"))
+    rows = [
+        nav,
+        [
+            InlineKeyboardButton(
+                text=f"🗓 بازه: {PERIODS[next_period][0]} ←",
+                callback_data=f"ad:{next_period}:{type_idx}:1"),
+            InlineKeyboardButton(
+                text="🏷 نوع بعدی",
+                callback_data=f"ad:{period}:{next_type}:1"),
+        ],
+    ]
+    await show(
+        target, "\n".join(lines),
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=edit
+    )
+
+
+@dp.callback_query(F.data.startswith("ad:"))
+async def activity_details_callback(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    try:
+        _, period, type_idx, page = callback.data.split(":")
+        if period not in PERIODS:
+            raise ValueError
+        await send_activity_details(
+            callback.message, period, int(type_idx), int(page),
+            callback.from_user.id,
+            edit=(callback.message.text or "").startswith("📊 جزئیات")
+        )
+    except Exception as exc:
+        print("ACTIVITY DETAIL ERROR:", exc)
+        await callback.answer("خطا", show_alert=True)
+        return
+    await callback.answer()
+
+
+# =========================================================
+# ADMIN: advisor permissions   /perm <telegram_id> sale|rent on|off
+# =========================================================
+
+@dp.message(Command("perm"))
+async def perm_command(message: Message):
+    if not await access_required(message):
+        return
+    if not is_admin(message.from_user.id):
+        await message.answer("⛔ فقط مدیر.")
+        return
+    parts = (message.text or "").split()
+    if (
+        len(parts) != 4
+        or parts[2] not in ("sale", "rent")
+        or parts[3] not in ("on", "off")
+    ):
+        await message.answer(
+            "فرمت: /perm <آیدی تلگرام> sale|rent on|off"
+        )
+        return
+    try:
+        target_id = int(normalize_digits(parts[1]))
+    except Exception:
+        await message.answer("آیدی نامعتبر است.")
+        return
+    column = "can_sale" if parts[2] == "sale" else "can_rent"
+    async with SessionLocal() as session:
+        user = (await session.execute(
+            select(User).where(User.telegram_id == target_id)
+        )).scalar_one_or_none()
+        if not user:
+            await message.answer(
+                "این کاربر هنوز /start نزده است."
+            )
+            return
+        setattr(user, column, 1 if parts[3] == "on" else 0)
+        await session.commit()
+    await message.answer("✅ ثبت شد.")
 
 
 # =========================================================
@@ -2047,6 +4330,7 @@ async def property_confirmation(
                 ""
             ),
             status="🟢 فعال",
+            deal_type=current_env(message.from_user.id),
             created_by=message.from_user.id,
             updated_at=datetime.utcnow()
         )
@@ -2097,6 +4381,7 @@ async def property_confirmation(
             message.from_user.id
         )
     )
+    await post_create_prompt(message, "p", prop.id)
 
 
 # =========================================================
@@ -2511,7 +4796,7 @@ async def client_search_page_callback(callback: CallbackQuery, state: FSMContext
 # PROPERTY DETAIL
 # =========================================================
 
-async def send_property_detail(
+async def send_property_detail_legacy(
     target,
     prop_id
 ):
@@ -4093,6 +6378,7 @@ async def client_save(
             bedrooms=0,
             description=message.text,
             status="فعال",
+            deal_type=current_env(message.from_user.id),
             created_by=message.from_user.id
         )
 
@@ -4121,6 +6407,7 @@ async def client_save(
             message.from_user.id
         )
     )
+    await post_create_prompt(message, "c", client.id)
 
 
 # =========================================================
@@ -4259,7 +6546,7 @@ async def client_page_callback(
 # CLIENT DETAIL
 # =========================================================
 
-async def send_client_detail(
+async def send_client_detail_legacy(
     target,
     client_id
 ):
