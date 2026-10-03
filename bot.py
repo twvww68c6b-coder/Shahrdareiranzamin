@@ -97,11 +97,7 @@ elif DATABASE_URL.startswith("sqlite:///"):
 
 engine = create_async_engine(
     DATABASE_URL,
-    echo=False,
-    connect_args={
-        "statement_cache_size": 0,
-        "prepared_statement_cache_size": 0,
-    },
+    echo=False
 )
 
 SessionLocal = async_sessionmaker(
@@ -292,6 +288,38 @@ class Property(Base):
         default=datetime.utcnow
     )
 
+    # ---- Stage 2 additions (safe, all with defaults) ----
+    deal_type: Mapped[str] = mapped_column(
+        String(30), default="فروش", index=True
+    )
+    rent_type: Mapped[str] = mapped_column(
+        String(30), default=""
+    )
+    ownership_type: Mapped[str] = mapped_column(
+        String(20), default="عمومی", index=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    is_urgent: Mapped[int] = mapped_column(
+        Integer, default=0, index=True
+    )
+    urgent_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True
+    )
+    follow_up_user_id: Mapped[int] = mapped_column(
+        Integer, nullable=True
+    )
+    floor_label: Mapped[str] = mapped_column(
+        String(50), default=""
+    )
+    convertible: Mapped[str] = mapped_column(
+        String(30), default=""
+    )
+    lease_term: Mapped[str] = mapped_column(
+        String(100), default=""
+    )
+
 
 class PropertyPhoto(Base):
     __tablename__ = "property_photos"
@@ -387,6 +415,54 @@ class Client(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
         default=datetime.utcnow
+    )
+
+    # ---- Stage 2 additions (safe, all with defaults) ----
+    deal_type: Mapped[str] = mapped_column(
+        String(30), default="فروش", index=True
+    )
+    rent_type: Mapped[str] = mapped_column(
+        String(30), default=""
+    )
+    ownership_type: Mapped[str] = mapped_column(
+        String(20), default="عمومی", index=True
+    )
+    owner_user_id: Mapped[int] = mapped_column(
+        Integer, nullable=True, index=True
+    )
+    is_urgent: Mapped[int] = mapped_column(
+        Integer, default=0, index=True
+    )
+    urgent_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True
+    )
+    follow_up_user_id: Mapped[int] = mapped_column(
+        Integer, nullable=True
+    )
+    max_deposit: Mapped[float] = mapped_column(
+        Float, default=0
+    )
+    max_rent: Mapped[float] = mapped_column(
+        Float, default=0
+    )
+    # Importance levels: "الزامی" / "ترجیحی" / "مهم نیست"
+    elevator_pref: Mapped[str] = mapped_column(
+        String(20), default="ترجیحی"
+    )
+    parking_pref: Mapped[str] = mapped_column(
+        String(20), default="ترجیحی"
+    )
+    storage_pref: Mapped[str] = mapped_column(
+        String(20), default="مهم نیست"
+    )
+    floor_pref: Mapped[str] = mapped_column(
+        String(20), default="مهم نیست"
+    )
+    floor_min: Mapped[int] = mapped_column(
+        Integer, nullable=True
+    )
+    floor_max: Mapped[int] = mapped_column(
+        Integer, nullable=True
     )
 
 
@@ -579,7 +655,7 @@ NEXT_ACTIONS = [
 
 PAGE_SIZE = 10
 
-MAX_PROPERTY_PHOTOS = 3
+MAX_PROPERTY_PHOTOS = 5
 
 
 # =========================================================
@@ -1048,6 +1124,93 @@ async def migrate():
             .where(Client.status.is_(None))
             .values(status="فعال")
         )
+
+        # ------------------------------------------------------
+        # Stage 2: new columns (additive only, nothing is dropped)
+        # ------------------------------------------------------
+        STAGE2_COLUMNS = {
+            "properties": [
+                ("deal_type", "VARCHAR(30) DEFAULT 'فروش'"),
+                ("rent_type", "VARCHAR(30) DEFAULT ''"),
+                ("ownership_type", "VARCHAR(20) DEFAULT 'عمومی'"),
+                ("owner_user_id", "INTEGER"),
+                ("is_urgent", "INTEGER DEFAULT 0"),
+                ("urgent_at", "TIMESTAMP"),
+                ("follow_up_user_id", "INTEGER"),
+                ("floor_label", "VARCHAR(50) DEFAULT ''"),
+                ("convertible", "VARCHAR(30) DEFAULT ''"),
+                ("lease_term", "VARCHAR(100) DEFAULT ''"),
+            ],
+            "clients": [
+                ("deal_type", "VARCHAR(30) DEFAULT 'فروش'"),
+                ("rent_type", "VARCHAR(30) DEFAULT ''"),
+                ("ownership_type", "VARCHAR(20) DEFAULT 'عمومی'"),
+                ("owner_user_id", "INTEGER"),
+                ("is_urgent", "INTEGER DEFAULT 0"),
+                ("urgent_at", "TIMESTAMP"),
+                ("follow_up_user_id", "INTEGER"),
+                ("max_deposit", "FLOAT DEFAULT 0"),
+                ("max_rent", "FLOAT DEFAULT 0"),
+                ("elevator_pref", "VARCHAR(20) DEFAULT 'ترجیحی'"),
+                ("parking_pref", "VARCHAR(20) DEFAULT 'ترجیحی'"),
+                ("storage_pref", "VARCHAR(20) DEFAULT 'مهم نیست'"),
+                ("floor_pref", "VARCHAR(20) DEFAULT 'مهم نیست'"),
+                ("floor_min", "INTEGER"),
+                ("floor_max", "INTEGER"),
+            ],
+        }
+
+        # Detect the first run of this migration (before columns exist),
+        # so the one-time rental classification never overwrites later edits.
+        props_cols_before = await conn.run_sync(
+            lambda sync_conn: get_columns(sync_conn, "properties")
+        )
+        first_run = "deal_type" not in props_cols_before
+
+        for table_name, cols in STAGE2_COLUMNS.items():
+            for col_name, col_type in cols:
+                await conn.run_sync(
+                    lambda sync_conn, t=table_name, c=col_name, ty=col_type:
+                    add_column_if_missing(sync_conn, t, c, ty)
+                )
+
+        # Backfill (idempotent: only touches rows that are still empty)
+        # Existing files that have a deposit or rent amount are rentals.
+        if first_run:
+            await conn.exec_driver_sql(
+                "UPDATE properties SET deal_type = 'اجاره' "
+                "WHERE COALESCE(deposit, 0) > 0 OR COALESCE(rent, 0) > 0"
+            )
+        for table_name in ("properties", "clients"):
+            await conn.exec_driver_sql(
+                f"UPDATE {table_name} SET deal_type = 'فروش' "
+                f"WHERE deal_type IS NULL"
+            )
+            await conn.exec_driver_sql(
+                f"UPDATE {table_name} SET ownership_type = 'عمومی' "
+                f"WHERE ownership_type IS NULL"
+            )
+            await conn.exec_driver_sql(
+                f"UPDATE {table_name} SET is_urgent = 0 "
+                f"WHERE is_urgent IS NULL"
+            )
+            await conn.exec_driver_sql(
+                f"UPDATE {table_name} SET owner_user_id = ("
+                f"SELECT users.id FROM users "
+                f"WHERE users.telegram_id = {table_name}.created_by) "
+                f"WHERE owner_user_id IS NULL"
+            )
+        # Existing clients all prefer (not require) elevator and parking.
+        for col, default_value in (
+            ("elevator_pref", "ترجیحی"),
+            ("parking_pref", "ترجیحی"),
+            ("storage_pref", "مهم نیست"),
+            ("floor_pref", "مهم نیست"),
+        ):
+            await conn.exec_driver_sql(
+                f"UPDATE clients SET {col} = '{default_value}' "
+                f"WHERE {col} IS NULL"
+            )
 
 
 # =========================================================
