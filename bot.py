@@ -3559,6 +3559,8 @@ async def send_property_detail(target, prop_id, edit=False):
         lines.append(
             f"📌 پیگیری: {names.get(prop.follow_up_user_id, '—')}"
         )
+    if (prop.description or '').strip():
+        lines.append(f"📝 توضیحات: {prop.description.strip()}")
     rows = [
         [
             InlineKeyboardButton(
@@ -3578,8 +3580,6 @@ async def send_property_detail(target, prop_id, edit=False):
         [
             InlineKeyboardButton(
                 text="📍 موقعیت", callback_data=f"ps:{prop.id}:loc"),
-            InlineKeyboardButton(
-                text="📝 توضیحات", callback_data=f"ps:{prop.id}:desc"),
         ],
         [
             InlineKeyboardButton(
