@@ -60,6 +60,15 @@ ADMIN_TELEGRAM_ID = os.getenv(
     ""
 ).strip()
 
+# Optional extra managers: comma separated Telegram IDs.
+ADMIN_TELEGRAM_IDS = {
+    x.strip()
+    for x in os.getenv("ADMIN_TELEGRAM_IDS", "").split(",")
+    if x.strip()
+}
+if ADMIN_TELEGRAM_ID:
+    ADMIN_TELEGRAM_IDS.add(ADMIN_TELEGRAM_ID)
+
 ALLOWED_TELEGRAM_IDS = {
     x.strip()
     for x in os.getenv(
@@ -839,6 +848,46 @@ def money(value):
         return str(value)
 
 
+PRICE_UNIT_LABEL = "میلیون تومان"
+
+
+def price_short(value):
+    """Display-only short price for SALE amounts.
+
+    The DB stores sale prices in Toman. The display is in million Toman with
+    the last three digits of the million-count after a slash:
+    29_000_000_000 -> "29/000", 1_250_000_000 -> "1/250".
+    Below one billion Toman the plain million count is shown (850_000_000
+    -> "850"). The stored value is never modified; call this only when
+    rendering text.
+    """
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return "0"
+
+    if value <= 0:
+        return "0"
+
+    millions = int(round(value / 1_000_000))
+
+    if millions < 1000:
+        return str(millions)
+
+    return f"{millions // 1000}/{millions % 1000:03d}"
+
+
+def price_label(value):
+    return f"{price_short(value)} ({PRICE_UNIT_LABEL})"
+
+
+def budget_label(low, high):
+    return (
+        f"{price_short(low)} تا {price_short(high)} "
+        f"({PRICE_UNIT_LABEL})"
+    )
+
+
 def display_value(value):
     if value is None:
         return ""
@@ -850,10 +899,7 @@ def display_value(value):
 
 
 def is_admin(user_id: int) -> bool:
-    return (
-        ADMIN_TELEGRAM_ID != ""
-        and str(user_id) == ADMIN_TELEGRAM_ID
-    )
+    return str(user_id) in ADMIN_TELEGRAM_IDS
 
 
 def is_allowed(user_id: int) -> bool:
@@ -1401,14 +1447,14 @@ def env_main_menu(user_id: int):
             ],
             include_cancel=False
         )
-    return keyboard(
-        [
-            ["🏠 فایل‌ها", "👤 مشتریان"],
-            ["🎯 پیشنهاد به مشتری", "⚡ ثبت سریع"],
-            ["📊 عملکرد من"],
-        ],
-        include_cancel=False
-    )
+    rows = [
+        ["🏠 فایل‌ها", "👤 مشتریان"],
+        ["🎯 پیشنهاد به مشتری", "⚡ ثبت سریع"],
+        ["📊 عملکرد من", "🤖 شهردار ایران‌زمین"],
+    ]
+    if is_admin(user_id):
+        rows.append(["📊 داشبورد مدیریتی"])
+    return keyboard(rows, include_cancel=False)
 
 
 def _env_suffix(user_id: int):
@@ -1464,7 +1510,7 @@ def vis_filter(model, user, tg_id):
 def prop_price_text(p):
     if p.deal_type == ENV_RENT:
         return f"رهن {money(p.deposit)} / اجاره {money(p.rent)}"
-    return money(p.price)
+    return price_label(p.price)
 
 
 def client_budget_text(c):
@@ -1473,7 +1519,7 @@ def client_budget_text(c):
             f"رهن تا {money(c.max_deposit)} / "
             f"اجاره تا {money(c.max_rent)}"
         )
-    return f"{money(c.min_budget)} تا {money(c.max_budget)}"
+    return budget_label(c.min_budget, c.max_budget)
 
 
 def ownership_text(obj):
@@ -1567,6 +1613,7 @@ async def files_menu(message: Message, state: FSMContext):
                 ["📋 همه فایل‌ها", "👤 فایل‌های من"],
                 ["🌐 فایل‌های عمومی", "🚨 فایل‌های فوری"],
                 ["⚡ ثبت سریع", "➕ ثبت فایل"],
+                ["📢 پیشنهاد آگهی‌گذاری"],
                 ["⬅️ بازگشت"],
             ],
             include_cancel=False
@@ -1592,6 +1639,21 @@ async def clients_menu(message: Message, state: FSMContext):
             include_cancel=False
         )
     )
+
+
+@dp.message(F.text == "📢 پیشنهاد آگهی‌گذاری")
+async def ad_menu_entry(message: Message, state: FSMContext):
+    await ad_home(message, state)
+
+
+@dp.message(F.text == "📊 داشبورد مدیریتی")
+async def dash_menu_entry(message: Message, state: FSMContext):
+    await dash_home(message, state)
+
+
+@dp.message(F.text == "🤖 شهردار ایران‌زمین")
+async def mayor_menu_entry(message: Message, state: FSMContext):
+    await mayor_start(message, state)
 
 
 LIST_ENTRIES = {
@@ -1971,6 +2033,7 @@ QR_KNOWN_BUTTONS = {
     "➕ ثبت فایل", "➕ ثبت مشتری", "👀 ثبت بازدید", "📞 پیگیری",
     "📊 KPI من", "👥 KPI تیم", "📝 آخرین فعالیت‌ها", "🔎 پیشنهاد فایل",
     "🚨 فوری", "📊 فعالیت‌ها", "🔄 تغییر محیط", "📊 عملکرد من",
+    "📢 پیشنهاد آگهی‌گذاری", "📊 داشبورد مدیریتی", "🤖 شهردار ایران‌زمین",
 }
 
 
@@ -2343,7 +2406,7 @@ def qr_tri_line(icon, label, value):
 
 
 QR_SOURCE_LABELS = {
-    "divar": "لینک دیوار", "text": "متن",
+    "divar": "لینک دیوار", "text": "متن", "voice": "ویس",
 }
 
 
@@ -2379,7 +2442,7 @@ def qr_render_preview(draft):
     lines.append(qr_tri_line("🛗", "آسانسور", f.get("elevator")))
     lines.append(qr_tri_line("📦", "انباری", f.get("storage")))
     lines.append(
-        f"💰 {qr_num_text(f['price'])} تومان"
+        f"💰 {price_label(f['price'])}"
         if f.get("price") is not None else "❔ قیمت نامشخص"
     )
     if f.get("address"):
@@ -2389,6 +2452,12 @@ def qr_render_preview(draft):
     if f.get("owner_phone"):
         lines.append(f"📞 {qr_fa(f['owner_phone'])}")
 
+    if draft.get("urgent_hint"):
+        lines.append("")
+        lines.append(
+            "🚨 در ویس به‌صراحت فوریت گفته شد؛ بعد از ثبت می‌توانی "
+            "«🚨 فوری کردن» را بزنی."
+        )
     notes = [w["t"] for w in draft.get("warnings", [])]
     ft, tf = f.get("floor"), f.get("total_floors")
     if ft is not None and tf is not None and ft > tf:
@@ -2877,6 +2946,7 @@ async def qr_create_property(tg_user, draft):
             f"{QR_SOURCE_LABELS.get(draft.get('source'), '—')})",
             property_id=prop.id,
         )
+        await ensure_ad_row(session, prop.id)
     return prop
 
 
@@ -2890,6 +2960,8 @@ async def qr_run_pipeline(message, kind, payload):
     url = token = None
     photos = []
     transcript = None
+    urgent_hint = False
+    ai_raw = {}
 
     if kind == "divar":
         url = payload
@@ -2906,10 +2978,21 @@ async def qr_run_pipeline(message, kind, payload):
     elif kind == "text":
         source_text = payload
 
+    elif kind == "voice":
+        try:
+            transcript, ai_raw, urgent_hint = await ai_voice_extract(
+                payload["bytes"], payload.get("mime") or "audio/ogg"
+            )
+        except AIError as exc:
+            raise QRError(exc.user_message)
+        source_text = transcript
+
     else:
-        raise QRError("فقط لینک دیوار یا متن آزاد پشتیبانی می‌شود.")
+        raise QRError("فقط لینک دیوار، متن آزاد یا ویس پشتیبانی می‌شود.")
 
     raw = qr_extract_local(source_text)
+    if kind == "voice":
+        raw = qr_merge_raw(raw, ai_raw)
     fields, warnings = qr_normalize(raw, source_text, kind)
     fields, warnings = qr_validate(fields, warnings)
 
@@ -2930,6 +3013,7 @@ async def qr_run_pipeline(message, kind, payload):
         "photos": photos,
         "photo_ids": [],
         "transcript": transcript,
+        "urgent_hint": urgent_hint,
         "similar_id": similar[0] if similar else None,
         "similar_code": similar[1] if similar else None,
     }
@@ -3017,10 +3101,16 @@ def qr_method_markup():
     return InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text="🔗 لینک دیوار", callback_data="qk:m:link"),
         InlineKeyboardButton(text="📝 متن آزاد", callback_data="qk:m:text"),
+    ], [
+        InlineKeyboardButton(text="🎙 ثبت با ویس", callback_data="qk:m:voice"),
     ]])
 
 
 QR_HINTS = {
+    "voice": "🎙 مشخصات ملک را به‌صورت پیام صوتی (ویس) بفرست؛ مثلاً "
+             "منطقه، متراژ، تعداد خواب، طبقه، قیمت و امکانات. "
+             "بعد از تبدیل به متن، پیش‌نمایش را می‌بینی و فقط با "
+             "تأیید خودت ثبت می‌شود.",
     "link": "🔗 لینک مستقیم آگهی دیوار را بفرست (مثل https://divar.ir/v/…).",
     "text": "📝 مشخصات را آزادانه در یک پیام بنوی؛ مثلاً:\n"
             "«خانی‌آباد نو جنوبی، ۸۵ متر، دو خواب، طبقه ۳، ۱۰ ساله، "
@@ -3039,9 +3129,10 @@ async def qr_start(message: Message, state: FSMContext):
     await state.set_state(QuickForm.waiting)
     await message.answer(
         "⚡ ثبت سریع فایل فروش\n\n"
-        "فقط یکی از این دو مورد را بفرست:\n"
+        "فقط یکی از این موارد را بفرست:\n"
         "🔗 لینک آگهی دیوار\n"
-        "📝 متن آزاد مشخصات فایل\n\n"
+        "📝 متن آزاد مشخصات فایل\n"
+        "🎙 پیام صوتی (ویس)\n\n"
         "مثال متن: خانی‌آباد نو جنوبی، ۸۵ متر، دو خواب، "
         "طبقه ۳، پارکینگ، آسانسور، ۳.۵ میلیارد",
         reply_markup=keyboard([], include_cancel=True),
@@ -3110,6 +3201,36 @@ async def qr_on_text(message: Message, state: FSMContext):
         await qr_process(message, state, "text", text)
 
 
+@dp.message(StateFilter(QuickForm.waiting, QuickForm.preview), F.voice)
+async def qr_on_voice(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    if not ai_available():
+        await message.answer(AI_UNAVAILABLE_TEXT)
+        return
+    v = message.voice
+    if (v.duration or 0) > VOICE_MAX_SECONDS:
+        await message.answer(
+            f"ویس خیلی طولانی است (حداکثر {VOICE_MAX_SECONDS} ثانیه). "
+            "کوتاه‌تر بفرست."
+        )
+        return
+    if (v.file_size or 0) > VOICE_MAX_BYTES:
+        await message.answer("حجم ویس زیاد است؛ کوتاه‌تر بفرست.")
+        return
+    try:
+        buf = await bot.download(v)
+        audio = buf.getvalue()
+    except Exception as exc:
+        print("VOICE DOWNLOAD ERROR:", type(exc).__name__)
+        await message.answer("⚠️ دریافت ویس انجام نشد؛ دوباره بفرست.")
+        return
+    await qr_process(
+        message, state, "voice",
+        {"bytes": audio, "mime": v.mime_type or "audio/ogg"},
+    )
+
+
 @dp.message(StateFilter(QuickForm.waiting, QuickForm.preview))
 async def qr_on_other(message: Message, state: FSMContext):
     if not await access_required(message):
@@ -3159,7 +3280,10 @@ async def qr_callback(callback: CallbackQuery, state: FSMContext):
     action = parts[1] if len(parts) > 1 else ""
 
     if action == "m":
-        await callback.message.answer(QR_HINTS.get(parts[2], ""))
+        if parts[2] == "voice" and not ai_available():
+            await callback.message.answer(AI_UNAVAILABLE_TEXT)
+        else:
+            await callback.message.answer(QR_HINTS.get(parts[2], ""))
         await callback.answer()
         return
 
@@ -3281,7 +3405,7 @@ async def qr_callback(callback: CallbackQuery, state: FSMContext):
             pass
         f = draft["fields"]
         price_txt = (
-            f"{qr_num_text(f['price'])} تومان"
+            price_label(f['price'])
             if f.get("price") is not None else "قیمت نامشخص"
         )
         await callback.message.answer(
@@ -3309,6 +3433,7 @@ async def performance_home(message: Message, state: FSMContext):
     rows = [["👀 ثبت بازدید", "📞 پیگیری"], ["📊 فعالیت‌ها"]]
     if is_admin(message.from_user.id):
         rows.append(["👥 KPI تیم", "📝 آخرین فعالیت‌ها"])
+        rows.append(["📊 داشبورد مدیریتی"])
     rows.append(["⬅️ بازگشت"])
     await message.answer(
         "ابزارهای عملکرد 👇",
@@ -3545,6 +3670,12 @@ async def send_property_detail(target, prop_id, edit=False):
         names = await user_name_map(
             session, [prop.owner_user_id, prop.follow_up_user_id]
         )
+        n_photos, n_videos = await media_counts(session, prop.id)
+        ad_status = await session.scalar(
+            select(PropertyAd.status).where(
+                PropertyAd.property_id == prop.id
+            )
+        )
     flag = "🚨 " if prop.is_urgent else ""
     lines = [
         f"{flag}🏠 فایل {prop.code}",
@@ -3553,6 +3684,8 @@ async def send_property_detail(target, prop_id, edit=False):
         f"📐 {money(prop.sqm)} متر | 🛏 {prop.bedrooms} خواب",
         f"💰 {prop_price_text(prop)}",
         f"📊 {prop.status}",
+        f"🖼 عکس: {n_photos} | 🎬 ویدئو: {n_videos}",
+        f"📢 آگهی: {AD_STATUS_LABELS.get(ad_status or AD_UNKNOWN, '—')}",
         f"👤 مسئول: {names.get(prop.owner_user_id, '—')}",
     ]
     if prop.is_urgent and prop.follow_up_user_id:
@@ -3576,6 +3709,12 @@ async def send_property_detail(target, prop_id, edit=False):
             InlineKeyboardButton(
                 text="👤 مالک / مسئول",
                 callback_data=f"ps:{prop.id}:owner"),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🎬 ویدئوها", callback_data=f"vp:{prop.id}"),
+            InlineKeyboardButton(
+                text="📢 وضعیت آگهی", callback_data=f"adv:s:{prop.id}"),
         ],
         [
             InlineKeyboardButton(
@@ -3662,10 +3801,10 @@ async def property_section(callback: CallbackQuery):
         else:
             text = (
                 f"💰 قیمت {p.code}\n\n"
-                f"قیمت: {money(p.price)}\n"
+                f"قیمت: {price_label(p.price)}\n"
                 f"وضعیت سکونت: {p.tenant or '—'}\n"
                 f"تاریخ تخلیه: {p.vacancy_date or '—'}\n"
-                f"ارزش معامله: {money(p.transaction_value)}"
+                f"ارزش معامله: {price_label(p.transaction_value)}"
             )
     elif sec == "owner":
         text = (
@@ -3717,6 +3856,8 @@ async def send_photo_manager(target, prop_id):
     if len(photos) < MAX_PROPERTY_PHOTOS:
         rows.append([InlineKeyboardButton(
             text="➕ افزودن عکس", callback_data=f"photos:{prop_id}")])
+    rows.append([InlineKeyboardButton(
+        text="🎬 ویدئوها", callback_data=f"vp:{prop_id}")])
     rows.append([InlineKeyboardButton(
         text="⬅️ بازگشت به فایل", callback_data=f"popen:{prop_id}")])
     await target.answer(
@@ -3773,6 +3914,13 @@ async def photo_delete(callback: CallbackQuery):
         prop_id = ph.property_id
         await session.delete(ph)
         await session.commit()
+        user = await get_user(
+            session, callback.from_user.id, callback.from_user.full_name
+        )
+        await add_activity(
+            session, user.id, "حذف عکس فایل", "یک عکس حذف شد.",
+            property_id=prop_id,
+        )
     await callback.answer("🗑 حذف شد")
     await send_photo_manager(callback.message, prop_id)
 
@@ -5695,7 +5843,7 @@ async def property_description(
         f"📍 منطقه: {data.get('area')}\n"
         f"🏠 آدرس: {data.get('address')}\n"
         f"📐 متراژ: {money(data.get('sqm'))}\n"
-        f"💰 قیمت: {money(data.get('price'))}\n"
+        f"💰 قیمت: {price_label(data.get('price'))}\n"
         f"🏢 نوع: {data.get('property_type')}\n"
         f"🛏 خواب: {data.get('bedrooms')}\n"
         f"🏢 طبقات: {data.get('floors')}\n"
@@ -5831,6 +5979,8 @@ async def property_confirmation(
             f"فایل {prop.code} ثبت شد.",
             property_id=prop.id
         )
+
+        await ensure_ad_row(session, prop.id)
 
         owner_count_result = await session.execute(
             select(
@@ -6203,7 +6353,7 @@ async def send_client_search_page(target, query: str, page: int = 1):
     ]
 
     for client in clients:
-        budget = f"{money(client.min_budget)} تا {money(client.max_budget)}"
+        budget = budget_label(client.min_budget, client.max_budget)
         buttons.append([
             InlineKeyboardButton(
                 text=f"👤 {client.name} | 💰 {budget}",
@@ -6331,7 +6481,7 @@ async def send_property_detail_legacy(
             f"📍 منطقه: {prop.area}\n"
             f"🏠 آدرس: {prop.address}\n"
             f"📐 متراژ: {money(prop.sqm)}\n"
-            f"💰 قیمت: {money(prop.price)}\n"
+            f"💰 قیمت: {price_label(prop.price)}\n"
             f"🏢 نوع: {prop.property_type}\n"
             f"🛏 خواب: {prop.bedrooms}\n"
             f"🏢 کل طبقات: {prop.floors}\n"
@@ -6350,7 +6500,7 @@ async def send_property_detail_legacy(
             f"📞 تلفن: {prop.owner_phone}\n"
             f"📊 وضعیت: {prop.status}\n"
             f"💰 ارزش معامله: "
-            f"{money(prop.transaction_value)}\n"
+            f"{price_label(prop.transaction_value)}\n"
             f"👥 تعداد فایل‌های مالک: "
             f"{owner_count_value}\n"
             f"📷 عکس‌ها: "
@@ -6542,6 +6692,10 @@ def edit_keyboard(
         InlineKeyboardButton(
             text="📷 عکس‌های فایل",
             callback_data=f"photos:{prop_id}"
+        ),
+        InlineKeyboardButton(
+            text="🎬 ویدئوهای فایل",
+            callback_data=f"vp:{prop_id}"
         )
     ])
 
@@ -7200,6 +7354,17 @@ async def property_delete_execute(
         for photo in photos_result.scalars().all():
             await session.delete(photo)
 
+        await session.execute(
+            sa_delete(PropertyVideo).where(
+                PropertyVideo.property_id == prop.id
+            )
+        )
+        await session.execute(
+            sa_delete(PropertyAd).where(
+                PropertyAd.property_id == prop.id
+            )
+        )
+
         user = await get_user(
             session,
             callback.from_user.id,
@@ -7327,6 +7492,10 @@ async def property_status_save(
 
         await session.commit()
 
+        await log_status_event(
+            session, prop.id, user.id, old_status, message.text
+        )
+
     await state.clear()
 
     await message.answer(
@@ -7393,6 +7562,10 @@ async def property_transaction_value(
         )
 
         await session.commit()
+
+        await log_status_event(
+            session, prop.id, user.id, old_status, SOLD_BY_US, value
+        )
 
     await state.clear()
 
@@ -7954,10 +8127,7 @@ async def send_client_page(
 
     for c in clients:
 
-        budget = (
-            f"{money(c.min_budget)} تا "
-            f"{money(c.max_budget)}"
-        )
+        budget = budget_label(c.min_budget, c.max_budget)
 
         buttons.append([
             InlineKeyboardButton(
@@ -8055,8 +8225,7 @@ async def send_client_detail_legacy(
         f"{money(client.min_sqm)} تا "
         f"{money(client.max_sqm)}\n"
         f"💰 بودجه: "
-        f"{money(client.min_budget)} تا "
-        f"{money(client.max_budget)}\n"
+        f"{budget_label(client.min_budget, client.max_budget)}\n"
         f"🏢 نوع ملک: {client.property_type}\n"
         f"📊 وضعیت: {client.status}\n"
         f"📝 توضیحات: {client.description}",
@@ -9186,7 +9355,7 @@ async def send_matching_page(target, client_id: int, page: int = 1):
             f"🏠 {prop.code}\n"
             f"📍 {prop.area}\n"
             f"📐 {money(prop.sqm)} متر\n"
-            f"💰 {money(prop.price)}\n"
+            f"💰 {price_label(prop.price)}\n"
             f"🏢 {prop.property_type}\n"
             f"🎯 تطابق: {score}%{visited_text}\n"
         )
@@ -9596,6 +9765,2727 @@ async def latest_activities(
 
 
 # =========================================================
+# STAGE 10: AI CLIENT, VIDEO, ADS, DASHBOARD, REMINDERS
+# (additive block - nothing above this line was removed)
+# =========================================================
+
+import base64
+import io
+from datetime import date as date_cls
+
+from aiogram.types import InputMediaVideo
+from sqlalchemy import (
+    BigInteger,
+    UniqueConstraint,
+    delete as sa_delete,
+)
+from sqlalchemy.exc import IntegrityError
+
+
+# ---------------------------------------------------------
+# Config (env only; the key is never printed or stored)
+# ---------------------------------------------------------
+
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL = (
+    os.getenv("GEMINI_MODEL", "").strip() or "gemini-flash-latest"
+)
+GEMINI_URL = (
+    "https://generativelanguage.googleapis.com/v1beta/models/"
+    f"{GEMINI_MODEL}:generateContent"
+)
+
+AI_UNAVAILABLE_TEXT = (
+    "🤖 سرویس هوش مصنوعی فعلاً در دسترس نیست.\n"
+    "بقیه‌ی امکانات ربات عادی کار می‌کنند؛ "
+    "می‌توانی از ثبت متنی، لینک دیوار یا ثبت دستی استفاده کنی."
+)
+
+MAX_PROPERTY_VIDEOS = 3
+VOICE_MAX_SECONDS = 180
+VOICE_MAX_BYTES = 12 * 1024 * 1024
+
+MAYOR_NAME = "شهردار ایران‌زمین"
+MAYOR_INTRO = (
+    "من شهردار ایران‌زمین هستم؛ دستیار هوشمند تیم املاک ایران‌زمین. "
+    "کار من کمک به مشاورها برای مدیریت فایل‌ها، آماده‌سازی آگهی‌های "
+    "حرفه‌ای، پیدا کردن فرصت‌های معاملاتی و افزایش شانس بستن "
+    "قرارداد است."
+)
+MAYOR_SYSTEM = (
+    f"تو «{MAYOR_NAME}» هستی؛ دستیار هوشمند تیم املاک ایران‌زمین. "
+    "حرفه‌ای، دقیق، نتیجه‌محور و دوستانه-کاری هستی و فارسی روان "
+    "می‌نویسی. تمرکزت بر جذب مشتری، فایل‌یابی، آگهی‌گذاری، بازدید، "
+    "مذاکره و قرارداد است.\n"
+    "قوانین سخت:\n"
+    "۱) هرگز اطلاعات ملک، مشتری، قیمت، فعالیت یا آمار نساز. فقط از "
+    "داده‌ی داده‌شده در همین گفتگو استفاده کن.\n"
+    "۲) اگر اطلاعات ناقص است، سؤال بپرس یا بگو داده‌ی کافی نیست.\n"
+    "۳) تو در این گفتگو هیچ اقدامی (ثبت، ویرایش، حذف، ارسال پیام، "
+    "انتشار آگهی) انجام نمی‌دهی و نباید ادعا کنی انجام داده‌ای؛ "
+    "مشاور باید از منوهای ربات استفاده کند.\n"
+    "۴) درباره‌ی احتمال فروش یا میزان تقاضا بدون داده‌ی معتبر قطعی "
+    "حرف نزن.\n"
+    "۵) پاسخ‌ها کوتاه و کاربردی باشند."
+)
+
+
+# ---------------------------------------------------------
+# New tables (created by Base.metadata.create_all in migrate();
+# no existing table or column is altered)
+# ---------------------------------------------------------
+
+class PropertyVideo(Base):
+    __tablename__ = "property_videos"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    property_id: Mapped[int] = mapped_column(Integer, index=True)
+    file_id: Mapped[str] = mapped_column(String(300))
+    file_unique_id: Mapped[str] = mapped_column(String(100), default="")
+    duration: Mapped[int] = mapped_column(Integer, default=0)
+    file_size: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_by: Mapped[int] = mapped_column(BigInteger, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow
+    )
+
+
+AD_UNADVERTISED = "unadvertised"
+AD_ADVERTISED = "advertised"
+AD_REVIEW = "review"
+AD_UNKNOWN = "unknown"  # virtual: no row exists for the property
+
+AD_STATUS_LABELS = {
+    AD_UNADVERTISED: "⬜ آگهی‌نشده",
+    AD_ADVERTISED: "✅ آگهی‌شده",
+    AD_REVIEW: "🔄 نیازمند بررسی مجدد",
+    AD_UNKNOWN: "❔ وضعیت نامشخص",
+}
+
+
+class PropertyAd(Base):
+    __tablename__ = "property_ads"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    property_id: Mapped[int] = mapped_column(
+        Integer, unique=True, index=True
+    )
+    status: Mapped[str] = mapped_column(
+        String(30), default=AD_UNADVERTISED, index=True
+    )
+    platform: Mapped[str] = mapped_column(String(100), default="")
+    published_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True
+    )
+    title: Mapped[str] = mapped_column(Text, default="")
+    text_short: Mapped[str] = mapped_column(Text, default="")
+    text_full: Mapped[str] = mapped_column(Text, default="")
+    missing_info: Mapped[str] = mapped_column(Text, default="")
+    text_source: Mapped[str] = mapped_column(String(20), default="")
+    generated_at: Mapped[datetime] = mapped_column(
+        DateTime, nullable=True
+    )
+    marked_by: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow
+    )
+
+
+class StatusEvent(Base):
+    """Structured history of file status changes (for reports)."""
+    __tablename__ = "status_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    property_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, default=0)
+    old_status: Mapped[str] = mapped_column(String(100), default="")
+    new_status: Mapped[str] = mapped_column(String(100), default="")
+    transaction_value: Mapped[float] = mapped_column(Float, default=0)
+    source: Mapped[str] = mapped_column(String(20), default="live")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow, index=True
+    )
+
+
+class ReminderLog(Base):
+    __tablename__ = "reminder_logs"
+    __table_args__ = (
+        UniqueConstraint("tg_id", "day", name="uq_reminder_tg_day"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    tg_id: Mapped[int] = mapped_column(BigInteger)
+    day: Mapped[str] = mapped_column(String(10))
+    items: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime, default=datetime.utcnow
+    )
+
+
+SOLD_BY_US = "🔵 معامله شد - توسط ما"
+SOLD_BY_OTHER = "🟣 معامله شد - توسط دیگری"
+STATUS_DROPPED = "🔴 منصرف شد"
+STATUS_NEGOTIATING = "🟡 در مذاکره"
+
+
+async def log_status_event(
+    session, property_id, user_id, old_status, new_status, value=0
+):
+    """Record a status change. Never lets a logging error break the flow."""
+    try:
+        session.add(StatusEvent(
+            property_id=property_id,
+            user_id=user_id or 0,
+            old_status=old_status or "",
+            new_status=new_status or "",
+            transaction_value=float(value or 0),
+            source="live",
+        ))
+        await session.commit()
+    except Exception as exc:
+        print("STATUS EVENT ERROR:", repr(exc)[:200])
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+
+
+async def ensure_ad_row(session, property_id, status=AD_UNADVERTISED):
+    """Create the ad-tracking row for a NEW file (never overwrites)."""
+    try:
+        exists = await session.scalar(
+            select(PropertyAd.id).where(
+                PropertyAd.property_id == property_id
+            )
+        )
+        if exists:
+            return
+        session.add(PropertyAd(property_id=property_id, status=status))
+        await session.commit()
+    except Exception as exc:
+        print("AD ROW ERROR:", repr(exc)[:200])
+        try:
+            await session.rollback()
+        except Exception:
+            pass
+
+
+def _parse_old_new(note):
+    if not note or " → " not in note:
+        return None
+    old, new = note.split(" → ", 1)
+    return old.strip(), new.strip()
+
+
+async def backfill_status_events():
+    """One-time import of old status changes from the activity log.
+
+    Runs only when status_events is empty, so it is safe to repeat.
+    """
+    try:
+        async with SessionLocal() as session:
+            have = await session.scalar(
+                select(func.count(StatusEvent.id))
+            )
+            if have:
+                return
+            rows = (await session.execute(
+                select(Activity).where(
+                    Activity.activity_type.in_(
+                        ["تغییر وضعیت فایل", "معامله فایل"]
+                    ),
+                    Activity.property_id > 0,
+                ).order_by(Activity.created_at)
+            )).scalars().all()
+            added = 0
+            for a in rows:
+                pair = _parse_old_new(a.note)
+                if not pair:
+                    continue
+                old, new = pair
+                value = 0.0
+                if a.activity_type == "معامله فایل":
+                    new = SOLD_BY_US
+                    m = re.search(r"ارزش معامله:\s*([\d,\.]+)", a.note or "")
+                    if m:
+                        value = number(m.group(1), 0)
+                session.add(StatusEvent(
+                    property_id=a.property_id,
+                    user_id=a.user_id or 0,
+                    old_status=old[:100],
+                    new_status=new[:100],
+                    transaction_value=float(value or 0),
+                    source="backfill",
+                    created_at=a.created_at,
+                ))
+                added += 1
+            await session.commit()
+            print(f"status_events backfill: {added}")
+    except Exception as exc:
+        print("BACKFILL ERROR:", repr(exc)[:200])
+
+
+# ---------------------------------------------------------
+# Gemini (REST via aiohttp; no new dependency)
+# ---------------------------------------------------------
+
+class AIError(Exception):
+    def __init__(self, user_message, code="error"):
+        super().__init__(code)
+        self.user_message = user_message
+        self.code = code
+
+
+def ai_available():
+    return bool(GEMINI_API_KEY)
+
+
+async def gemini_generate(
+    parts, system=None, json_mode=False, temperature=0.2, timeout=60
+):
+    if not GEMINI_API_KEY:
+        raise AIError(AI_UNAVAILABLE_TEXT, "no_key")
+
+    body = {
+        "contents": [{"role": "user", "parts": parts}],
+        "generationConfig": {"temperature": temperature},
+    }
+    if system:
+        body["systemInstruction"] = {"parts": [{"text": system}]}
+    if json_mode:
+        body["generationConfig"]["responseMimeType"] = "application/json"
+
+    headers = {
+        "x-goog-api-key": GEMINI_API_KEY,
+        "Content-Type": "application/json",
+    }
+
+    try:
+        async with aiohttp.ClientSession(
+            timeout=aiohttp.ClientTimeout(total=timeout)
+        ) as http:
+            async with http.post(
+                GEMINI_URL, json=body, headers=headers
+            ) as resp:
+                status = resp.status
+                try:
+                    data = await resp.json(content_type=None)
+                except Exception:
+                    data = {}
+    except asyncio.TimeoutError:
+        raise AIError(
+            "⏱ پاسخ سرویس هوش مصنوعی دیر شد؛ کمی بعد دوباره تلاش کن.",
+            "timeout",
+        )
+    except Exception as exc:
+        print("AI NETWORK ERROR:", type(exc).__name__)
+        raise AIError(AI_UNAVAILABLE_TEXT, "network")
+
+    if status == 429:
+        print("AI ERROR: quota/rate limit (429)")
+        raise AIError(
+            "🤖 سهمیه‌ی سرویس هوش مصنوعی فعلاً تمام شده؛ "
+            "کمی بعد دوباره تلاش کن یا از ثبت متنی استفاده کن.",
+            "quota",
+        )
+    if status in (400, 401, 403):
+        err = (data or {}).get("error", {}) if isinstance(data, dict) else {}
+        print("AI ERROR:", status, str(err.get("status", ""))[:60])
+        raise AIError(AI_UNAVAILABLE_TEXT, "auth")
+    if status >= 500 or status != 200:
+        print("AI ERROR: http", status)
+        raise AIError(AI_UNAVAILABLE_TEXT, "server")
+
+    try:
+        cands = data.get("candidates") or []
+        parts_out = cands[0]["content"]["parts"]
+        text = "".join(p.get("text", "") for p in parts_out).strip()
+    except Exception:
+        text = ""
+    if not text:
+        raise AIError(
+            "🤖 پاسخ قابل استفاده‌ای از سرویس هوش مصنوعی نگرفتم.",
+            "empty",
+        )
+    return text
+
+
+def parse_json_loose(text):
+    text = (text or "").strip()
+    if text.startswith("```"):
+        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
+        text = re.sub(r"\s*```$", "", text)
+    try:
+        return json.loads(text)
+    except Exception:
+        pass
+    a, b = text.find("{"), text.rfind("}")
+    if a != -1 and b > a:
+        try:
+            return json.loads(text[a:b + 1])
+        except Exception:
+            pass
+    return None
+
+
+# ---------------------------------------------------------
+# Voice registration helpers
+# ---------------------------------------------------------
+
+VOICE_PROMPT = (
+    "این پیام صوتی فارسی یک مشاور املاک است که مشخصات یک فایل ملکی "
+    "را می‌گوید. ابتدا گفتار را عیناً به متن فارسی تبدیل کن، سپس "
+    "فقط مواردی را که صریحاً گفته شده استخراج کن. هیچ مقداری را حدس "
+    "نزن و اگر چیزی گفته نشده آن را در خروجی نیاور.\n"
+    "خروجی فقط JSON با این ساختار باشد:\n"
+    '{"transcript": "متن کامل گفتار", '
+    '"fields": {"<نام فیلد>": {"value": ..., "evidence": '
+    '"عین عبارت گفته‌شده از transcript"}}, '
+    '"urgent": false, "urgent_evidence": ""}\n'
+    "نام فیلدهای مجاز و نوع مقدار:\n"
+    "transaction_type: sale یا rent | area: منطقه/محله (متن) | "
+    "address: آدرس | property_type: نوع ملک | meterage: عدد متر | "
+    "bedrooms: عدد | floor: عدد طبقه | total_floors: عدد کل طبقات | "
+    "building_age: عدد سن بنا | parking/elevator/storage: true یا false | "
+    "price: قیمت فروش به تومان به‌صورت عدد کامل (مثلاً سه و نیم "
+    "میلیارد = 3500000000) | owner_name | owner_phone.\n"
+    "قانون evidence: برای هر فیلد، دقیقاً همان کلمات گفته‌شده را که "
+    "مقدار از آن‌ها آمده بنویس و آن عبارت باید عیناً داخل transcript "
+    "باشد.\n"
+    "urgent را فقط وقتی true بگذار که گوینده صریحاً فوریت فروش را "
+    "بگوید (مثل «فوری» یا «عجله دارد») و همان عبارت را در "
+    "urgent_evidence بیاور."
+)
+
+
+async def ai_voice_extract(audio_bytes, mime="audio/ogg"):
+    """Returns (transcript, raw_fields, urgent_hint). Raises AIError."""
+    parts = [
+        {"inline_data": {
+            "mime_type": mime,
+            "data": base64.b64encode(audio_bytes).decode("ascii"),
+        }},
+        {"text": VOICE_PROMPT},
+    ]
+    text = await gemini_generate(
+        parts, json_mode=True, temperature=0.0, timeout=90
+    )
+    obj = parse_json_loose(text)
+    if not isinstance(obj, dict):
+        raise AIError(
+            "🤖 نتوانستم ویس را درست تحلیل کنم؛ دوباره بفرست یا متنی "
+            "ثبت کن.", "parse",
+        )
+    transcript = str(obj.get("transcript") or "").strip()
+    if not transcript:
+        raise AIError(
+            "🎙 صدای قابل تشخیصی در ویس پیدا نشد؛ واضح‌تر بفرست.",
+            "empty",
+        )
+    raw = {}
+    fields = obj.get("fields")
+    if isinstance(fields, dict):
+        for key in QR_ALL_FIELDS:
+            item = fields.get(key)
+            if isinstance(item, dict):
+                value = item.get("value")
+                evidence = str(item.get("evidence") or "")
+            else:
+                value, evidence = item, ""
+            if value in (None, "", [], {}):
+                continue
+            raw[key] = {"value": value, "evidence": evidence}
+    urgent = False
+    if obj.get("urgent") is True:
+        ev = qr_squash(str(obj.get("urgent_evidence") or ""))
+        urgent = bool(ev) and ev in qr_squash(transcript)
+    return transcript, raw, urgent
+
+
+def qr_merge_raw(local_raw, ai_raw):
+    """Deterministic local values win; AI only fills the gaps."""
+    merged = dict(ai_raw or {})
+    for key, val in (local_raw or {}).items():
+        merged[key] = val
+    return merged
+
+
+# ---------------------------------------------------------
+# VIDEO SUPPORT
+# ---------------------------------------------------------
+
+class VideoForm(StatesGroup):
+    property_id = State()
+
+
+async def media_counts(session, property_id):
+    photos = await session.scalar(
+        select(func.count(PropertyPhoto.id)).where(
+            PropertyPhoto.property_id == property_id
+        )
+    ) or 0
+    videos = await session.scalar(
+        select(func.count(PropertyVideo.id)).where(
+            PropertyVideo.property_id == property_id
+        )
+    ) or 0
+    return photos, videos
+
+
+async def send_video_manager(target, prop_id):
+    async with SessionLocal() as session:
+        vids = (await session.execute(
+            select(PropertyVideo)
+            .where(PropertyVideo.property_id == prop_id)
+            .order_by(PropertyVideo.created_at, PropertyVideo.id)
+        )).scalars().all()
+    rows = []
+    for i, v in enumerate(vids, start=1):
+        suffix = f" ({v.duration}ث)" if v.duration else ""
+        rows.append([InlineKeyboardButton(
+            text=f"🗑 حذف ویدئو {i}{suffix}",
+            callback_data=f"vdel:{v.id}")])
+    if len(vids) < MAX_PROPERTY_VIDEOS:
+        rows.append([InlineKeyboardButton(
+            text="➕ افزودن ویدئو", callback_data=f"vadd:{prop_id}")])
+    rows.append([InlineKeyboardButton(
+        text="📸 تصاویر", callback_data=f"pimg:{prop_id}")])
+    rows.append([InlineKeyboardButton(
+        text="⬅️ بازگشت به فایل", callback_data=f"popen:{prop_id}")])
+    await target.answer(
+        f"🎬 مدیریت ویدئوها ({len(vids)}/{MAX_PROPERTY_VIDEOS})",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    )
+    return len(vids)
+
+
+@dp.callback_query(F.data.startswith("vp:"))
+async def video_panel(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    prop_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        vids = (await session.execute(
+            select(PropertyVideo)
+            .where(PropertyVideo.property_id == prop_id)
+            .order_by(PropertyVideo.created_at, PropertyVideo.id)
+        )).scalars().all()
+    chat_id = callback.message.chat.id
+    try:
+        if len(vids) == 1:
+            await bot.send_video(chat_id, vids[0].file_id)
+        elif len(vids) > 1:
+            await bot.send_media_group(
+                chat_id,
+                [InputMediaVideo(media=v.file_id) for v in vids],
+            )
+    except Exception as exc:
+        print("SEND VIDEOS ERROR:", repr(exc)[:200])
+        await callback.message.answer(
+            "⚠️ ارسال ویدئوها انجام نشد؛ دوباره تلاش کن."
+        )
+    await send_video_manager(callback.message, prop_id)
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("vadd:"))
+async def video_add_start(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+    prop_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        _, vcount = await media_counts(session, prop_id)
+    if vcount >= MAX_PROPERTY_VIDEOS:
+        await callback.answer(
+            f"حداکثر {MAX_PROPERTY_VIDEOS} ویدئو مجاز است.",
+            show_alert=True,
+        )
+        return
+    await state.clear()
+    await state.update_data(property_id=prop_id)
+    await state.set_state(VideoForm.property_id)
+    await callback.message.answer(
+        f"🎬 ویدئوی فایل را بفرست ({vcount}/{MAX_PROPERTY_VIDEOS}).\n"
+        "آن را به‌صورت «ویدئو» بفرست (نه فایل). "
+        "وقتی تمام شد «پایان» را بزن.",
+        reply_markup=keyboard([["پایان"]]),
+    )
+    await callback.answer()
+
+
+@dp.message(VideoForm.property_id, F.video)
+async def video_receive(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    data = await state.get_data()
+    prop_id = data.get("property_id")
+    if not prop_id:
+        await state.clear()
+        return
+    async with SessionLocal() as session:
+        _, vcount = await media_counts(session, prop_id)
+        if vcount >= MAX_PROPERTY_VIDEOS:
+            await message.answer(
+                f"⚠️ حداکثر {MAX_PROPERTY_VIDEOS} ویدئو مجاز است. "
+                "«پایان» را بزن."
+            )
+            return
+        vid = message.video
+        session.add(PropertyVideo(
+            property_id=prop_id,
+            file_id=vid.file_id,
+            file_unique_id=vid.file_unique_id or "",
+            duration=int(vid.duration or 0),
+            file_size=int(vid.file_size or 0),
+            created_by=message.from_user.id,
+        ))
+        await session.commit()
+        user = await get_user(
+            session, message.from_user.id, message.from_user.full_name
+        )
+        await add_activity(
+            session, user.id, "افزودن ویدئو فایل",
+            f"ویدئو {vcount + 1}/{MAX_PROPERTY_VIDEOS} اضافه شد.",
+            property_id=prop_id,
+        )
+    await message.answer(
+        f"✅ ویدئو ذخیره شد ({vcount + 1}/{MAX_PROPERTY_VIDEOS}). "
+        "ویدئوی بعدی را بفرست یا «پایان» را بزن."
+    )
+
+
+@dp.message(VideoForm.property_id, F.text == "پایان")
+async def video_add_done(message: Message, state: FSMContext):
+    data = await state.get_data()
+    prop_id = data.get("property_id")
+    await state.clear()
+    await message.answer(
+        "✅ انجام شد.", reply_markup=main_menu(message.from_user.id)
+    )
+    if prop_id:
+        await send_video_manager(message, prop_id)
+
+
+@dp.message(VideoForm.property_id)
+async def video_add_wrong(message: Message):
+    await message.answer(
+        "لطفاً یک ویدئو بفرست (به‌صورت ویدئو، نه فایل) یا «پایان» را بزن."
+    )
+
+
+@dp.callback_query(F.data.startswith("vdel:"))
+async def video_delete(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return
+    vid_id = int(callback.data.split(":")[1])
+    async with SessionLocal() as session:
+        v = (await session.execute(
+            select(PropertyVideo).where(PropertyVideo.id == vid_id)
+        )).scalar_one_or_none()
+        if not v:
+            await callback.answer("پیدا نشد", show_alert=True)
+            return
+        prop_id = v.property_id
+        await session.delete(v)
+        await session.commit()
+        user = await get_user(
+            session, callback.from_user.id, callback.from_user.full_name
+        )
+        await add_activity(
+            session, user.id, "حذف ویدئو فایل", "یک ویدئو حذف شد.",
+            property_id=prop_id,
+        )
+    await callback.answer("🗑 حذف شد")
+    await send_video_manager(callback.message, prop_id)
+
+
+# ---------------------------------------------------------
+# 📢 AD SUGGESTIONS
+# ---------------------------------------------------------
+
+AD_PAGE_SIZE = 5
+AD_STALE_DAYS = 45
+AD_FRESH_DAYS = 14
+AD_PLATFORMS = ["دیوار", "شیپور", "اینستاگرام", "سایر", "بدون ذکر پلتفرم"]
+
+
+class AdEditForm(StatesGroup):
+    text = State()
+
+
+def ad_readiness(prop, n_photos, n_videos, now=None):
+    """Explainable readiness score (0-100) for advertising a file.
+
+    Uses only real stored fields. It is NOT a sale probability.
+    Returns (score, todo_list, ok_list).
+    """
+    now = now or datetime.utcnow()
+    score = 0
+    todo, ok = [], []
+
+    if (prop.price or 0) > 0:
+        score += 25
+        ok.append("قیمت ثبت شده")
+    else:
+        todo.append("قیمت باید از مالک تأیید شود")
+    if (prop.area or "").strip():
+        score += 10
+    else:
+        todo.append("منطقه مشخص نیست")
+    if (prop.sqm or 0) > 0:
+        score += 10
+    else:
+        todo.append("متراژ مشخص نیست")
+    if (prop.property_type or "").strip():
+        score += 5
+    else:
+        todo.append("نوع ملک مشخص نیست")
+    if (prop.bedrooms or 0) > 0:
+        score += 5
+    if (prop.floor_label or "").strip() or (prop.unit_floor or 0) != 0 \
+            or (prop.floors or 0) > 0:
+        score += 5
+    else:
+        todo.append("طبقه مشخص نیست")
+    if (prop.address or "").strip():
+        score += 5
+    if len((prop.description or "").strip()) >= 20:
+        score += 5
+
+    if n_photos >= 5:
+        score += 12
+        ok.append(f"{n_photos} عکس")
+    elif n_photos >= 3:
+        score += 10
+        ok.append(f"{n_photos} عکس")
+    elif n_photos >= 1:
+        score += 5
+        todo.append("تعداد عکس کم است")
+    else:
+        todo.append("عکس ندارد")
+    if n_videos > 0:
+        score += 8
+        ok.append("ویدئو دارد")
+
+    ref = prop.updated_at or prop.created_at
+    if ref:
+        age = (now - ref).days
+        if age <= AD_FRESH_DAYS:
+            score += 10
+            ok.append("به‌روز است")
+        elif age <= AD_STALE_DAYS:
+            score += 5
+        else:
+            todo.append(
+                f"{age} روز بدون به‌روزرسانی؛ اعتبار فایل را تأیید کن"
+            )
+    return min(score, 100), todo, ok
+
+
+def ad_reason_text(status, todo):
+    if status == AD_REVIEW:
+        base = "برای بررسی مجدد علامت خورده"
+        return base + (("؛ " + "، ".join(todo[:2])) if todo else "")
+    if not todo:
+        return "اطلاعات کامل است اما هنوز آگهی‌گذاری ثبت نشده"
+    return "قبل از آگهی‌گذاری: " + "، ".join(todo[:2])
+
+
+def ad_missing_list(prop, n_photos):
+    """Items the advisor must confirm with the owner (code-computed)."""
+    items = []
+    if (prop.price or 0) <= 0:
+        items.append("قیمت نهایی")
+    if not (prop.address or "").strip():
+        items.append("آدرس/موقعیت دقیق")
+    if not (prop.document_type or "").strip():
+        items.append("وضعیت سند")
+    for label, value in (
+        ("آسانسور", prop.elevator),
+        ("پارکینگ", prop.parking),
+        ("انباری", prop.storage),
+    ):
+        if not (value or "").strip():
+            items.append(f"وضعیت {label}")
+    if not (prop.tenant or "").strip():
+        items.append("وضعیت سکونت (خالی/مستأجر/مالک)")
+    ref = prop.updated_at or prop.created_at
+    if ref and (datetime.utcnow() - ref).days > AD_STALE_DAYS:
+        items.append("معتبر بودن فایل و قیمت (مدت زیادی به‌روز نشده)")
+    if n_photos == 0:
+        items.append("عکس ملک")
+    return items
+
+
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?98|0)?9\d{9}(?!\d)|(?<!\d)0\d{10}(?!\d)")
+
+
+def sanitize_description(text):
+    t = normalize_digits(text or "")
+    t = _URL_RE.sub("", t)
+    t = _PHONE_RE.sub("", t)
+    t = re.sub(r"🔗", "", t)
+    t = re.sub(r"\s+", " ", t).strip()
+    return t[:400]
+
+
+def ad_facts(prop):
+    """Only real DB values; used for both the AI prompt and the template."""
+    f = []
+    if (prop.property_type or "").strip():
+        f.append(f"نوع ملک: {prop.property_type}")
+    if (prop.area or "").strip():
+        f.append(f"منطقه: {prop.area}")
+    if (prop.sqm or 0) > 0:
+        f.append(f"متراژ: {money(prop.sqm)} متر")
+    if (prop.bedrooms or 0) > 0:
+        f.append(f"تعداد خواب: {prop.bedrooms}")
+    floor_info = (prop.floor_label or "").strip()
+    if not floor_info and (prop.unit_floor or 0) != 0:
+        floor_info = f"طبقه {prop.unit_floor}"
+        if (prop.floors or 0) > 0:
+            floor_info += f" از {prop.floors}"
+    if floor_info:
+        f.append(f"طبقه: {floor_info}")
+    if prop.building_age is not None:
+        f.append(f"سن بنا: {prop.building_age} سال")
+    for label, value in (
+        ("آسانسور", prop.elevator),
+        ("پارکینگ", prop.parking),
+        ("انباری", prop.storage),
+    ):
+        if (value or "").strip():
+            f.append(f"{label}: {value}")
+    if (prop.document_type or "").strip():
+        f.append(f"سند: {prop.document_type}")
+    if (prop.price or 0) > 0:
+        f.append(f"قیمت: {price_label(prop.price)}")
+    desc = sanitize_description(prop.description)
+    if desc:
+        f.append(f"توضیحات مالک: {desc}")
+    return f
+
+
+def ad_template_text(prop):
+    """Deterministic fallback (no AI). Contains only stored facts."""
+    bits = [prop.property_type or "ملک"]
+    if (prop.sqm or 0) > 0:
+        bits.append(f"{money(prop.sqm)} متری")
+    if (prop.bedrooms or 0) > 0:
+        bits.append(f"{prop.bedrooms} خوابه")
+    title = " ".join(bits)
+    if (prop.area or "").strip():
+        title += f" در {prop.area}"
+    facts = ad_facts(prop)
+    short = title
+    if (prop.price or 0) > 0:
+        short += f" | قیمت: {price_label(prop.price)}"
+    full = title + "\n\n" + "\n".join(f"• {x}" for x in facts)
+    return title, short, full
+
+
+def _numbers_in(text):
+    return set(re.findall(r"\d+", normalize_digits(text or "")))
+
+
+def ad_text_is_grounded(ad_text, facts):
+    """Reject AI text that contains numbers absent from the stored facts."""
+    allowed = _numbers_in("\n".join(facts))
+    return _numbers_in(ad_text) <= allowed
+
+
+AD_PROMPT = (
+    "برای فایل ملکی زیر یک آگهی حرفه‌ای و روان فارسی بنویس.\n"
+    "قوانین سخت: فقط از اطلاعات داده‌شده استفاده کن. هیچ امکانات، "
+    "قیمت، موقعیت، شرایط پرداخت، مدت یا ویژگی‌ای که در اطلاعات نیست "
+    "اضافه نکن. هیچ عدد جدیدی اضافه نکن. شماره تلفن یا لینک ننویس. "
+    "قیمت را دقیقاً با همان قالب داده‌شده بنویس.\n"
+    'خروجی فقط JSON: {"title": "عنوان کوتاه", "short": "نسخه کوتاه '
+    '(حداکثر ۳ خط)", "full": "نسخه کامل"}\n\nاطلاعات فایل:\n'
+)
+
+
+async def generate_ad_text(prop):
+    """Returns (title, short, full, source). source: ai | template."""
+    facts = ad_facts(prop)
+    if ai_available():
+        try:
+            text = await gemini_generate(
+                [{"text": AD_PROMPT + "\n".join(facts)}],
+                system=MAYOR_SYSTEM,
+                json_mode=True,
+                temperature=0.4,
+                timeout=60,
+            )
+            obj = parse_json_loose(text)
+            if isinstance(obj, dict):
+                title = str(obj.get("title") or "").strip()
+                short = str(obj.get("short") or "").strip()
+                full = str(obj.get("full") or "").strip()
+                combined = " ".join([title, short, full])
+                if (
+                    title and full
+                    and ad_text_is_grounded(combined, facts)
+                    and not _URL_RE.search(combined)
+                    and not _PHONE_RE.search(normalize_digits(combined))
+                ):
+                    return title, short or title, full, "ai"
+                print("AD AI OUTPUT REJECTED (ungrounded)")
+        except AIError as exc:
+            print("AD AI ERROR:", exc.code)
+        except Exception as exc:
+            print("AD AI ERROR:", type(exc).__name__)
+    t, s, f = ad_template_text(prop)
+    return t, s, f, "template"
+
+
+async def load_ad_candidates(session, tg_id, user):
+    """Active sale files with their ad state + media counts."""
+    stmt = select(Property).where(active_property_filter())
+    vf = vis_filter(Property, user, tg_id)
+    if vf is not None:
+        stmt = stmt.where(vf)
+    props = (await session.execute(stmt)).scalars().all()
+    ids = [p.id for p in props]
+    ads, photos, videos = {}, {}, {}
+    if ids:
+        for a in (await session.execute(
+            select(PropertyAd).where(PropertyAd.property_id.in_(ids))
+        )).scalars().all():
+            ads[a.property_id] = a
+        for pid, c in (await session.execute(
+            select(PropertyPhoto.property_id, func.count(PropertyPhoto.id))
+            .where(PropertyPhoto.property_id.in_(ids))
+            .group_by(PropertyPhoto.property_id)
+        )).all():
+            photos[pid] = c
+        for pid, c in (await session.execute(
+            select(PropertyVideo.property_id, func.count(PropertyVideo.id))
+            .where(PropertyVideo.property_id.in_(ids))
+            .group_by(PropertyVideo.property_id)
+        )).all():
+            videos[pid] = c
+    out = []
+    for p in props:
+        ad = ads.get(p.id)
+        status = ad.status if ad else AD_UNKNOWN
+        score, todo, ok = ad_readiness(
+            p, photos.get(p.id, 0), videos.get(p.id, 0)
+        )
+        out.append({
+            "prop": p, "ad": ad, "status": status, "score": score,
+            "todo": todo, "photos": photos.get(p.id, 0),
+            "videos": videos.get(p.id, 0),
+        })
+    return out
+
+
+def ad_summary_counts(cands):
+    c = {AD_UNADVERTISED: 0, AD_REVIEW: 0, AD_ADVERTISED: 0, AD_UNKNOWN: 0}
+    for x in cands:
+        c[x["status"]] = c.get(x["status"], 0) + 1
+    return c
+
+
+def _ad_home_markup(counts):
+    rows = [
+        [InlineKeyboardButton(
+            text=f"📋 پیشنهادها ({counts[AD_UNADVERTISED] + counts[AD_REVIEW]})",
+            callback_data="adv:l:1")],
+        [InlineKeyboardButton(
+            text=f"❔ وضعیت نامشخص ({counts[AD_UNKNOWN]})",
+            callback_data="adv:uk:1")],
+        [InlineKeyboardButton(
+            text=f"✅ آگهی‌شده‌ها ({counts[AD_ADVERTISED]})",
+            callback_data="adv:a:1")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def ad_home(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    await state.clear()
+    async with SessionLocal() as session:
+        user = await get_user(
+            session, message.from_user.id, message.from_user.full_name
+        )
+        cands = await load_ad_candidates(
+            session, message.from_user.id, user
+        )
+    counts = ad_summary_counts(cands)
+    lines = [
+        "📢 پیشنهاد آگهی‌گذاری",
+        "",
+        f"⬜ آگهی‌نشده: {counts[AD_UNADVERTISED]}",
+        f"🔄 نیازمند بررسی مجدد: {counts[AD_REVIEW]}",
+        f"❔ وضعیت نامشخص: {counts[AD_UNKNOWN]}",
+        f"✅ آگهی‌شده: {counts[AD_ADVERTISED]}",
+        "",
+        "فایل‌های «نامشخص» هیچ‌وقت خودکار آگهی‌نشده فرض نمی‌شوند؛ "
+        "وضعیتشان را خودت مشخص کن.",
+        "ثبت «آگهی‌شده» فقط یک ثبت داخلی است؛ ربات در هیچ پلتفرمی "
+        "آگهی منتشر نمی‌کند.",
+    ]
+    if not ai_available():
+        lines.append(
+            "ℹ️ هوش مصنوعی فعال نیست؛ متن آگهی با قالب پایه ساخته می‌شود."
+        )
+    await message.answer(
+        "\n".join(lines), reply_markup=_ad_home_markup(counts)
+    )
+
+
+def _ad_card(i, x):
+    p = x["prop"]
+    price = price_label(p.price) if (p.price or 0) > 0 else "قیمت ثبت نشده"
+    return (
+        f"{i}) {p.code} | {p.area or '—'} | {money(p.sqm)}م\n"
+        f"   💰 {price}\n"
+        f"   📊 امتیاز آمادگی: {x['score']}/100 "
+        f"(🖼 {x['photos']} | 🎬 {x['videos']})\n"
+        f"   💡 {ad_reason_text(x['status'], x['todo'])}"
+    )
+
+
+async def ad_send_list(callback, kind, page):
+    tg = callback.from_user
+    async with SessionLocal() as session:
+        user = await get_user(session, tg.id, tg.full_name)
+        cands = await load_ad_candidates(session, tg.id, user)
+    if kind == "l":
+        items = [x for x in cands if x["status"] in (AD_UNADVERTISED, AD_REVIEW)]
+        items.sort(key=lambda x: (-x["score"], x["prop"].id))
+        title = "📋 پیشنهادهای آگهی‌گذاری (به ترتیب آمادگی)"
+    elif kind == "uk":
+        items = [x for x in cands if x["status"] == AD_UNKNOWN]
+        items.sort(key=lambda x: x["prop"].id)
+        title = "❔ فایل‌های با وضعیت آگهی نامشخص"
+    else:
+        items = [x for x in cands if x["status"] == AD_ADVERTISED]
+        items.sort(key=lambda x: (
+            x["ad"].published_at or datetime.min), reverse=True)
+        title = "✅ فایل‌های آگهی‌شده"
+    total = len(items)
+    pages = max(1, (total + AD_PAGE_SIZE - 1) // AD_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    chunk = items[(page - 1) * AD_PAGE_SIZE: page * AD_PAGE_SIZE]
+    lines = [f"{title} — {total} فایل", ""]
+    rows = []
+    if not chunk:
+        lines.append("موردی نیست.")
+    for i, x in enumerate(chunk, start=(page - 1) * AD_PAGE_SIZE + 1):
+        p = x["prop"]
+        if kind == "a":
+            ad = x["ad"]
+            when = tehran_time(ad.published_at) if ad.published_at else "—"
+            lines.append(
+                f"{i}) {p.code} | {p.area or '—'}\n"
+                f"   پلتفرم (اعلام مشاور): {ad.platform or '—'} | "
+                f"زمان ثبت: {when}"
+            )
+        else:
+            lines.append(_ad_card(i, x))
+        lines.append("")
+        row = [InlineKeyboardButton(
+            text=f"👁 {p.code}", callback_data=f"popen:{p.id}")]
+        if kind == "uk":
+            row.append(InlineKeyboardButton(
+                text="⬜ آگهی‌نشده", callback_data=f"adv:set:{p.id}:u"))
+            row.append(InlineKeyboardButton(
+                text="✅ آگهی‌شده", callback_data=f"adv:m:{p.id}"))
+        elif kind == "a":
+            row.append(InlineKeyboardButton(
+                text="⚙️ وضعیت", callback_data=f"adv:s:{p.id}"))
+        else:
+            row.append(InlineKeyboardButton(
+                text="✍️ متن آگهی", callback_data=f"adv:g:{p.id}"))
+        rows.append(row)
+    if kind == "uk" and total and is_admin(tg.id):
+        rows.append([InlineKeyboardButton(
+            text="⬜ همه‌ی نامشخص‌ها = آگهی‌نشده (مدیر)",
+            callback_data="adv:bulk")])
+    nav = pagination_keyboard(f"adv:{kind}", page, pages)
+    rows.extend(nav.inline_keyboard)
+    rows.append([InlineKeyboardButton(
+        text="⬅️ خلاصه", callback_data="adv:home")])
+    await show(
+        callback.message, "\n".join(lines)[:3900],
+        InlineKeyboardMarkup(inline_keyboard=rows), edit=True,
+    )
+
+
+async def _ad_get_prop(session, prop_id, tg_id):
+    prop = (await session.execute(
+        select(Property).where(Property.id == prop_id)
+    )).scalar_one_or_none()
+    if not prop:
+        return None
+    if (prop.ownership_type or "عمومی") == "شخصی" and not is_admin(tg_id):
+        user = await get_user(session, tg_id, "")
+        if prop.owner_user_id != user.id:
+            return None
+    return prop
+
+
+def _ad_text_message(prop, ad, status_note=""):
+    lines = [f"✍️ آگهی فایل {prop.code}"]
+    lines.append(f"وضعیت: {AD_STATUS_LABELS.get(ad.status, '—')}")
+    if ad.text_source == "ai":
+        lines.append("منبع متن: هوش مصنوعی (از داده‌های ثبت‌شده)")
+    elif ad.text_source == "manual":
+        lines.append("منبع متن: ویرایش دستی مشاور")
+    elif ad.text_source == "template":
+        lines.append("منبع متن: قالب پایه (بدون هوش مصنوعی)")
+    if status_note:
+        lines.append(status_note)
+    lines += ["", f"🏷 عنوان: {ad.title}", "", "📝 نسخه کوتاه:",
+              ad.text_short, "", "📄 نسخه کامل:", ad.text_full]
+    if ad.missing_info:
+        lines += ["", "⚠️ قبل از انتشار از مالک تأیید شود:",
+                  ad.missing_info]
+    return "\n".join(lines)[:3900]
+
+
+def _ad_text_markup(prop_id):
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🔁 تولید مجدد", callback_data=f"adv:r:{prop_id}"),
+         InlineKeyboardButton(
+            text="✏️ ویرایش متن", callback_data=f"adv:e:{prop_id}")],
+        [InlineKeyboardButton(
+            text="📋 کپی متن", callback_data=f"adv:c:{prop_id}"),
+         InlineKeyboardButton(
+            text="👁 مشاهده فایل", callback_data=f"popen:{prop_id}")],
+        [InlineKeyboardButton(
+            text="✅ ثبت به‌عنوان آگهی‌شده",
+            callback_data=f"adv:m:{prop_id}")],
+    ])
+
+
+async def ad_generate_and_store(session, prop, user, regenerate):
+    n_photos, _ = await media_counts(session, prop.id)
+    title, short, full, source = await generate_ad_text(prop)
+    missing = "\n".join(
+        f"• {x}" for x in ad_missing_list(prop, n_photos)
+    )
+    ad = (await session.execute(
+        select(PropertyAd).where(PropertyAd.property_id == prop.id)
+    )).scalar_one_or_none()
+    if not ad:
+        ad = PropertyAd(property_id=prop.id, status=AD_UNKNOWN)
+        session.add(ad)
+        # a file with no tracking row stays "unknown" until the advisor
+        # decides; generating text never marks it advertised/unadvertised.
+    ad.title, ad.text_short, ad.text_full = title, short, full
+    ad.missing_info = missing
+    ad.text_source = source
+    ad.generated_at = datetime.utcnow()
+    ad.updated_at = datetime.utcnow()
+    await session.commit()
+    await add_activity(
+        session, user.id,
+        "تولید مجدد متن آگهی" if regenerate else "تولید متن آگهی",
+        f"فایل {prop.code} | منبع: {source}",
+        property_id=prop.id,
+    )
+    return ad
+
+
+@dp.callback_query(F.data.startswith("adv:"))
+async def ad_callbacks(callback: CallbackQuery, state: FSMContext):
+    if not await callback_access_required(callback):
+        return
+    parts = callback.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    tg = callback.from_user
+
+    if action == "home":
+        async with SessionLocal() as session:
+            user = await get_user(session, tg.id, tg.full_name)
+            cands = await load_ad_candidates(session, tg.id, user)
+        counts = ad_summary_counts(cands)
+        await show(
+            callback.message,
+            "📢 پیشنهاد آگهی‌گذاری\n\n"
+            f"⬜ آگهی‌نشده: {counts[AD_UNADVERTISED]}\n"
+            f"🔄 نیازمند بررسی مجدد: {counts[AD_REVIEW]}\n"
+            f"❔ نامشخص: {counts[AD_UNKNOWN]}\n"
+            f"✅ آگهی‌شده: {counts[AD_ADVERTISED]}",
+            _ad_home_markup(counts), edit=True,
+        )
+        await callback.answer()
+        return
+
+    if action in ("l", "uk", "a"):
+        await ad_send_list(callback, action, int(parts[2]))
+        await callback.answer()
+        return
+
+    if action in ("g", "r"):
+        prop_id = int(parts[2])
+        async with SessionLocal() as session:
+            prop = await _ad_get_prop(session, prop_id, tg.id)
+            if not prop:
+                await callback.answer("فایل پیدا نشد", show_alert=True)
+                return
+            user = await get_user(session, tg.id, tg.full_name)
+            ad = (await session.execute(
+                select(PropertyAd).where(PropertyAd.property_id == prop_id)
+            )).scalar_one_or_none()
+            if action == "g" and ad and ad.text_full:
+                text = _ad_text_message(prop, ad)
+            else:
+                await callback.answer("⏳ در حال تولید…")
+                ad = await ad_generate_and_store(
+                    session, prop, user, regenerate=(action == "r")
+                )
+                note = ""
+                if ad.text_source == "template" and ai_available():
+                    note = "ℹ️ متن هوش مصنوعی قابل اعتماد نبود؛ قالب پایه ساخته شد."
+                text = _ad_text_message(prop, ad, note)
+        await callback.message.answer(
+            text, reply_markup=_ad_text_markup(prop_id)
+        )
+        try:
+            await callback.answer()
+        except Exception:
+            pass
+        return
+
+    if action == "c":
+        prop_id = int(parts[2])
+        async with SessionLocal() as session:
+            ad = (await session.execute(
+                select(PropertyAd).where(PropertyAd.property_id == prop_id)
+            )).scalar_one_or_none()
+        if not ad or not ad.text_full:
+            await callback.answer("ابتدا متن را تولید کن.", show_alert=True)
+            return
+        body = f"{ad.title}\n\n{ad.text_full}"
+        await callback.message.answer(
+            "📋 برای کپی، روی متن بزن:\n\n"
+            f"<pre>{html_lib.escape(body)[:3500]}</pre>",
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    if action == "e":
+        prop_id = int(parts[2])
+        await state.clear()
+        await state.update_data(property_id=prop_id)
+        await state.set_state(AdEditForm.text)
+        await callback.message.answer(
+            "✏️ متن جدید «نسخه کامل» آگهی را بفرست.\n"
+            "(فقط اطلاعات تأییدشده بنویس.)",
+            reply_markup=keyboard([], include_cancel=True),
+        )
+        await callback.answer()
+        return
+
+    if action == "set":
+        prop_id, code = int(parts[2]), parts[3]
+        new_status = AD_UNADVERTISED if code == "u" else AD_REVIEW
+        async with SessionLocal() as session:
+            prop = await _ad_get_prop(session, prop_id, tg.id)
+            if not prop:
+                await callback.answer("فایل پیدا نشد", show_alert=True)
+                return
+            user = await get_user(session, tg.id, tg.full_name)
+            ad = (await session.execute(
+                select(PropertyAd).where(PropertyAd.property_id == prop_id)
+            )).scalar_one_or_none()
+            old = ad.status if ad else AD_UNKNOWN
+            if not ad:
+                ad = PropertyAd(property_id=prop_id)
+                session.add(ad)
+            ad.status = new_status
+            ad.marked_by = user.id
+            ad.updated_at = datetime.utcnow()
+            await session.commit()
+            await add_activity(
+                session, user.id, "تغییر وضعیت آگهی",
+                f"{AD_STATUS_LABELS.get(old)} → "
+                f"{AD_STATUS_LABELS.get(new_status)}",
+                property_id=prop_id,
+            )
+        await callback.answer("✅ ثبت شد")
+        await callback.message.answer(
+            f"✅ وضعیت آگهی فایل {prop.code}: "
+            f"{AD_STATUS_LABELS[new_status]}"
+        )
+        return
+
+    if action == "s":
+        prop_id = int(parts[2])
+        async with SessionLocal() as session:
+            prop = await _ad_get_prop(session, prop_id, tg.id)
+            ad = (await session.execute(
+                select(PropertyAd).where(PropertyAd.property_id == prop_id)
+            )).scalar_one_or_none()
+        if not prop:
+            await callback.answer("فایل پیدا نشد", show_alert=True)
+            return
+        st = ad.status if ad else AD_UNKNOWN
+        rows = [
+            [InlineKeyboardButton(
+                text="🔄 نیاز به بررسی مجدد",
+                callback_data=f"adv:set:{prop_id}:r")],
+            [InlineKeyboardButton(
+                text="⬜ آگهی‌نشده", callback_data=f"adv:set:{prop_id}:u")],
+            [InlineKeyboardButton(
+                text="✍️ متن آگهی", callback_data=f"adv:g:{prop_id}")],
+            [InlineKeyboardButton(
+                text="👁 مشاهده فایل", callback_data=f"popen:{prop_id}")],
+        ]
+        extra = ""
+        if ad and ad.status == AD_ADVERTISED:
+            extra = (
+                f"\nپلتفرم (اعلام مشاور): {ad.platform or '—'}"
+                f"\nزمان ثبت: "
+                f"{tehran_time(ad.published_at) if ad.published_at else '—'}"
+            )
+        await callback.message.answer(
+            f"📢 وضعیت آگهی فایل {prop.code}: "
+            f"{AD_STATUS_LABELS[st]}{extra}",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        await callback.answer()
+        return
+
+    if action == "m":
+        prop_id = int(parts[2])
+        rows = [[InlineKeyboardButton(
+            text=name, callback_data=f"adv:p:{prop_id}:{i}")]
+            for i, name in enumerate(AD_PLATFORMS)]
+        rows.append([InlineKeyboardButton(
+            text="❌ انصراف", callback_data=f"popen:{prop_id}")])
+        await callback.message.answer(
+            "این آگهی را در کدام پلتفرم گذاشته‌ای؟\n"
+            "(ربات خودش آگهی منتشر نمی‌کند؛ این فقط ثبت اعلام توست.)",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+        )
+        await callback.answer()
+        return
+
+    if action == "p":
+        prop_id, idx = int(parts[2]), int(parts[3])
+        if not (0 <= idx < len(AD_PLATFORMS)):
+            await callback.answer()
+            return
+        await callback.message.answer(
+            f"تأیید می‌کنی که آگهی این فایل «{AD_PLATFORMS[idx]}» "
+            "گذاشته شده است؟",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="✅ تأیید و ثبت",
+                    callback_data=f"adv:k:{prop_id}:{idx}"),
+                InlineKeyboardButton(
+                    text="❌ انصراف", callback_data=f"popen:{prop_id}"),
+            ]]),
+        )
+        await callback.answer()
+        return
+
+    if action == "k":
+        prop_id, idx = int(parts[2]), int(parts[3])
+        if not (0 <= idx < len(AD_PLATFORMS)):
+            await callback.answer()
+            return
+        platform = "" if idx == len(AD_PLATFORMS) - 1 else AD_PLATFORMS[idx]
+        async with SessionLocal() as session:
+            prop = await _ad_get_prop(session, prop_id, tg.id)
+            if not prop:
+                await callback.answer("فایل پیدا نشد", show_alert=True)
+                return
+            user = await get_user(session, tg.id, tg.full_name)
+            ad = (await session.execute(
+                select(PropertyAd).where(PropertyAd.property_id == prop_id)
+            )).scalar_one_or_none()
+            old = ad.status if ad else AD_UNKNOWN
+            if old == AD_ADVERTISED:
+                await callback.answer("قبلاً آگهی‌شده ثبت شده.", show_alert=True)
+                return
+            if not ad:
+                ad = PropertyAd(property_id=prop_id)
+                session.add(ad)
+            ad.status = AD_ADVERTISED
+            ad.platform = platform
+            ad.published_at = datetime.utcnow()
+            ad.marked_by = user.id
+            ad.updated_at = datetime.utcnow()
+            await session.commit()
+            await add_activity(
+                session, user.id, "تأیید و ثبت آگهی‌شده",
+                f"پلتفرم (اعلام مشاور): {platform or 'نامشخص'}",
+                property_id=prop_id,
+            )
+        await callback.answer("✅ ثبت شد")
+        await callback.message.answer(
+            f"✅ فایل {prop.code} به‌عنوان «آگهی‌شده» ثبت شد.\n"
+            "یادآوری: این ثبت بر اساس اعلام شماست و ربات انتشار "
+            "واقعی را تأیید نمی‌کند."
+        )
+        return
+
+    if action == "bulk":
+        if not is_admin(tg.id):
+            await callback.answer("⛔ فقط مدیر.", show_alert=True)
+            return
+        await callback.message.answer(
+            "همه‌ی فایل‌های فعال با وضعیت نامشخص «آگهی‌نشده» علامت بخورند؟\n"
+            "(فقط اگر مطمئنی هیچ‌کدام قبلاً آگهی نشده‌اند.)",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="✅ بله، همه", callback_data="adv:bulkok"),
+                InlineKeyboardButton(
+                    text="❌ انصراف", callback_data="adv:home"),
+            ]]),
+        )
+        await callback.answer()
+        return
+
+    if action == "bulkok":
+        if not is_admin(tg.id):
+            await callback.answer("⛔ فقط مدیر.", show_alert=True)
+            return
+        async with SessionLocal() as session:
+            user = await get_user(session, tg.id, tg.full_name)
+            cands = await load_ad_candidates(session, tg.id, user)
+            n = 0
+            for x in cands:
+                if x["status"] == AD_UNKNOWN:
+                    session.add(PropertyAd(
+                        property_id=x["prop"].id, status=AD_UNADVERTISED,
+                        marked_by=user.id))
+                    n += 1
+            await session.commit()
+            await add_activity(
+                session, user.id, "تغییر وضعیت آگهی",
+                f"{n} فایل نامشخص → آگهی‌نشده (دسته‌ای)",
+            )
+        await callback.answer("✅ انجام شد")
+        await callback.message.answer(f"✅ {n} فایل «آگهی‌نشده» علامت خورد.")
+        return
+
+    await callback.answer()
+
+
+@dp.message(AdEditForm.text, F.text)
+async def ad_edit_save(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    data = await state.get_data()
+    prop_id = data.get("property_id")
+    text = (message.text or "").strip()
+    if not prop_id or not text:
+        await state.clear()
+        return
+    async with SessionLocal() as session:
+        prop = await _ad_get_prop(session, prop_id, message.from_user.id)
+        if not prop:
+            await state.clear()
+            await message.answer("فایل پیدا نشد.")
+            return
+        user = await get_user(
+            session, message.from_user.id, message.from_user.full_name
+        )
+        ad = (await session.execute(
+            select(PropertyAd).where(PropertyAd.property_id == prop_id)
+        )).scalar_one_or_none()
+        if not ad:
+            ad = PropertyAd(property_id=prop_id, status=AD_UNKNOWN)
+            session.add(ad)
+        ad.text_full = text[:3500]
+        if not ad.title:
+            ad.title = text.splitlines()[0][:150]
+        if not ad.text_short:
+            ad.text_short = ad.title
+        ad.text_source = "manual"
+        ad.updated_at = datetime.utcnow()
+        await session.commit()
+        await add_activity(
+            session, user.id, "ویرایش متن آگهی",
+            f"متن آگهی فایل {prop.code} ویرایش شد.",
+            property_id=prop_id,
+        )
+        out = _ad_text_message(prop, ad)
+    await state.clear()
+    await message.answer(
+        "✅ متن ذخیره شد.", reply_markup=main_menu(message.from_user.id)
+    )
+    await message.answer(out, reply_markup=_ad_text_markup(prop_id))
+
+
+# ---------------------------------------------------------
+# 📊 MANAGER DASHBOARD (admin only, real DB data only)
+# ---------------------------------------------------------
+
+DASH_PAGE = 5
+DASH_LIST_PAGE = 8
+IDLE_DAYS = 14
+ACTIONABLE_NEXT = ("پیگیری", "بازدید مجدد", "مذاکره", "قرارداد")
+CALL_ACTIVITY_TYPES = ("تماس با مالک", "پیگیری")
+
+DASH_PERIOD = {}   # tg_id -> period dict (UI state)
+DASH_FILTER = {}   # tg_id -> files filter dict (UI state)
+
+
+class DashForm(StatesGroup):
+    custom = State()
+
+
+# ---- Jalali <-> Gregorian (pure) ----
+
+def gregorian_to_jalali(gy, gm, gd):
+    g_d_m = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
+    gy2 = gy + 1 if gm > 2 else gy
+    days = (
+        355666 + (365 * gy) + ((gy2 + 3) // 4) - ((gy2 + 99) // 100)
+        + ((gy2 + 399) // 400) + gd + g_d_m[gm - 1]
+    )
+    jy = -1595 + (33 * (days // 12053))
+    days %= 12053
+    jy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        jy += (days - 1) // 365
+        days = (days - 1) % 365
+    if days < 186:
+        jm = 1 + (days // 31)
+        jd = 1 + (days % 31)
+    else:
+        jm = 7 + ((days - 186) // 30)
+        jd = 1 + ((days - 186) % 30)
+    return jy, jm, jd
+
+
+def jalali_to_gregorian(jy, jm, jd):
+    jy += 1595
+    days = (
+        -355668 + (365 * jy) + ((jy // 33) * 8) + (((jy % 33) + 3) // 4)
+        + jd + (((jm - 1) * 31) if jm < 7 else (((jm - 7) * 30) + 186))
+    )
+    gy = 400 * (days // 146097)
+    days %= 146097
+    if days > 36524:
+        days -= 1
+        gy += 100 * (days // 36524)
+        days %= 36524
+        if days >= 365:
+            days += 1
+    gy += 4 * (days // 1461)
+    days %= 1461
+    if days > 365:
+        gy += (days - 1) // 365
+        days = (days - 1) % 365
+    gd = days + 1
+    leap = (gy % 4 == 0 and gy % 100 != 0) or gy % 400 == 0
+    months = [0, 31, 29 if leap else 28, 31, 30, 31, 30, 31, 31, 30, 31,
+              30, 31]
+    gm = 0
+    while gm < 13 and gd > months[gm]:
+        gd -= months[gm]
+        gm += 1
+    return gy, gm, gd
+
+
+_DATE_RE = re.compile(r"(\d{4})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{1,2})")
+
+
+def parse_date_text(text):
+    """Jalali (year < 1700) or Gregorian date text -> date, else None."""
+    if not text:
+        return None
+    m = _DATE_RE.search(normalize_digits(text))
+    if not m:
+        return None
+    y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    try:
+        if y < 1700:
+            if not (1 <= mo <= 12 and 1 <= d <= 31):
+                return None
+            y, mo, d = jalali_to_gregorian(y, mo, d)
+        return date_cls(y, mo, d)
+    except Exception:
+        return None
+
+
+def parse_all_dates(text):
+    out = []
+    for m in _DATE_RE.finditer(normalize_digits(text or "")):
+        d = parse_date_text(m.group(0))
+        if d:
+            out.append(d)
+    return out
+
+
+def fmt_jalali(d):
+    if not d:
+        return "—"
+    jy, jm, jd = gregorian_to_jalali(d.year, d.month, d.day)
+    return f"{jy}/{jm:02d}/{jd:02d}"
+
+
+def tehran_today(now_utc=None):
+    return ((now_utc or datetime.utcnow()) + TEHRAN_OFFSET).date()
+
+
+def tehran_day_start_utc(d):
+    return datetime(d.year, d.month, d.day) - TEHRAN_OFFSET
+
+
+def make_period(key, today=None, custom=None):
+    today = today or tehran_today()
+    if key == "t":
+        s, e, label = today, today, "امروز"
+    elif key == "w":
+        s, e, label = today - timedelta(days=6), today, "۷ روز اخیر"
+    elif key == "c" and custom:
+        s, e = custom
+        if s > e:
+            s, e = e, s
+        label = f"{fmt_jalali(s)} تا {fmt_jalali(e)}"
+    else:
+        key = "m"
+        s, e, label = today - timedelta(days=29), today, "۳۰ روز اخیر"
+    length = (e - s).days + 1
+    ps, pe = s - timedelta(days=length), s - timedelta(days=1)
+    return {
+        "key": key, "label": label, "s": s, "e": e,
+        "start": tehran_day_start_utc(s),
+        "end": tehran_day_start_utc(e) + timedelta(days=1),
+        "prev_start": tehran_day_start_utc(ps),
+        "prev_end": tehran_day_start_utc(pe) + timedelta(days=1),
+    }
+
+
+def get_period(tg_id):
+    p = DASH_PERIOD.get(tg_id)
+    if p and p["key"] == "c":
+        return p
+    return make_period((p or {}).get("key", "m"))
+
+
+def _in(dt, start, end):
+    return dt is not None and start <= dt < end
+
+
+# ---- data loading (DB -> plain dicts) ----
+
+async def dash_load(period):
+    async with SessionLocal() as session:
+        users = (await session.execute(select(User))).scalars().all()
+        props = (await session.execute(
+            select(Property).where(_sale_only(Property))
+        )).scalars().all()
+        clients = (await session.execute(
+            select(Client).where(_sale_only(Client))
+        )).scalars().all()
+        visits = (await session.execute(select(Visit))).scalars().all()
+        events = (await session.execute(select(StatusEvent))).scalars().all()
+        ad_rows = (await session.execute(
+            select(PropertyAd.property_id, PropertyAd.status)
+        )).all()
+        photos = dict((await session.execute(
+            select(PropertyPhoto.property_id, func.count(PropertyPhoto.id))
+            .group_by(PropertyPhoto.property_id)
+        )).all())
+        videos = dict((await session.execute(
+            select(PropertyVideo.property_id, func.count(PropertyVideo.id))
+            .group_by(PropertyVideo.property_id)
+        )).all())
+        last_p = dict((await session.execute(
+            select(Activity.property_id, func.max(Activity.created_at))
+            .where(Activity.property_id > 0)
+            .group_by(Activity.property_id)
+        )).all())
+        last_c = dict((await session.execute(
+            select(Activity.client_id, func.max(Activity.created_at))
+            .where(Activity.client_id > 0)
+            .group_by(Activity.client_id)
+        )).all())
+        acts = (await session.execute(
+            select(Activity.user_id, Activity.activity_type,
+                   Activity.created_at)
+            .where(Activity.created_at >= period["prev_start"])
+        )).all()
+
+    users_l = [{"id": u.id, "tg": u.telegram_id,
+                "name": u.name or "بدون نام"} for u in users]
+    tg_by_uid = {u["id"]: u["tg"] for u in users_l}
+    ad_by_pid = {pid: st for pid, st in ad_rows}
+
+    props_l = []
+    for p in props:
+        resp = tg_by_uid.get(p.owner_user_id) if p.owner_user_id else None
+        props_l.append({
+            "id": p.id, "code": p.code, "area": p.area or "",
+            "status": p.status or "", "created_by": p.created_by,
+            "resp_tg": resp or p.created_by,
+            "created_at": p.created_at, "updated_at": p.updated_at,
+            "price": p.price or 0, "sqm": p.sqm or 0,
+            "type": p.property_type or "", "bedrooms": p.bedrooms or 0,
+            "address": (p.address or "").strip(),
+            "owner_phone": (p.owner_phone or "").strip(),
+            "floor_known": bool(
+                (p.floor_label or "").strip()
+                or (p.unit_floor or 0) != 0 or (p.floors or 0) > 0),
+            "deal_type": p.deal_type or ENV_SALE,
+            "ad": ad_by_pid.get(p.id, AD_UNKNOWN),
+            "photos": photos.get(p.id, 0), "videos": videos.get(p.id, 0),
+            "last_act": last_p.get(p.id),
+        })
+    clients_l = [{
+        "id": c.id, "name": c.name, "status": c.status or "",
+        "created_by": c.created_by, "created_at": c.created_at,
+        "max_budget": c.max_budget or 0, "last_act": last_c.get(c.id),
+    } for c in clients]
+    visits_l = [{
+        "id": v.id, "property_id": v.property_id,
+        "client_id": v.client_id, "agent_tg": v.agent_id,
+        "visited_at": v.visited_at, "interest": v.interest or "",
+        "next_action": v.next_action or "",
+        "followup_date": v.followup_date or "",
+    } for v in visits]
+    events_l = [{
+        "property_id": e.property_id, "user_id": e.user_id,
+        "tg": tg_by_uid.get(e.user_id), "old": e.old_status,
+        "new": e.new_status, "value": e.transaction_value or 0,
+        "at": e.created_at,
+    } for e in events]
+    acts_l = [{"tg": tg_by_uid.get(uid), "type": t, "at": at}
+              for uid, t, at in acts]
+    return {
+        "users": users_l, "properties": props_l, "clients": clients_l,
+        "visits": visits_l, "events": events_l, "acts": acts_l,
+    }
+
+
+# ---- pure computations ----
+
+def prop_critical_missing(p):
+    miss = []
+    if p["price"] <= 0:
+        miss.append("قیمت")
+    if not p["area"]:
+        miss.append("منطقه")
+    if p["sqm"] <= 0:
+        miss.append("متراژ")
+    if not p["type"]:
+        miss.append("نوع ملک")
+    if not p["owner_phone"]:
+        miss.append("تلفن مالک")
+    return miss
+
+
+def prop_incomplete_missing(p):
+    miss = list(prop_critical_missing(p))
+    if not p["address"]:
+        miss.append("آدرس")
+    if not p["floor_known"]:
+        miss.append("طبقه")
+    if p["type"] == "آپارتمان" and p["bedrooms"] <= 0:
+        miss.append("تعداد خواب")
+    if p["photos"] == 0:
+        miss.append("عکس")
+    return miss
+
+
+def dash_followups(data, now_utc):
+    """Follow-ups taken from each client's LATEST visit.
+
+    A follow-up is considered handled when the client has any logged
+    activity after that visit record. Dates that cannot be parsed
+    (e.g. «ندارد») produce no dated follow-up.
+    """
+    today = tehran_today(now_utc)
+    props = {p["id"]: p for p in data["properties"]}
+    clients = {c["id"]: c for c in data["clients"]}
+    latest = {}
+    for v in data["visits"]:
+        if v["client_id"] not in clients:
+            continue
+        cur = latest.get(v["client_id"])
+        if cur is None or (v["visited_at"] or datetime.min) > (
+                cur["visited_at"] or datetime.min):
+            latest[v["client_id"]] = v
+    dated, waiting = [], []
+    for cid, v in latest.items():
+        c, p = clients[cid], props.get(v["property_id"])
+        if c["status"] not in ACTIVE_CLIENT_STATUSES:
+            continue
+        if not p or p["status"] not in ACTIVE_PROPERTY_STATUSES:
+            continue
+        handled = bool(
+            c["last_act"] and v["visited_at"]
+            and c["last_act"] > v["visited_at"] + timedelta(minutes=10)
+        )
+        due = parse_date_text(v["followup_date"])
+        item = {
+            "client": c, "prop": p, "visit": v, "due": due,
+            "agent_tg": v["agent_tg"], "handled": handled,
+        }
+        if due and not handled:
+            if due < today:
+                item["kind"] = "overdue"
+                item["days_over"] = (today - due).days
+            elif due == today:
+                item["kind"] = "today"
+            else:
+                item["kind"] = "upcoming"
+            dated.append(item)
+        if (not handled and v["next_action"] in ACTIONABLE_NEXT):
+            waiting.append(item)
+    return {"dated": dated, "waiting": waiting, "today": today}
+
+
+def dash_opportunities(data, now_utc, fol):
+    action_pts = {"قرارداد": 40, "مذاکره": 30, "بازدید مجدد": 15,
+                  "پیگیری": 10}
+    interest_pts = {"خیلی زیاد": 25, "زیاد": 15, "متوسط": 5}
+    props = {p["id"]: p for p in data["properties"]}
+    clients = {c["id"]: c for c in data["clients"]}
+    overdue_keys = {
+        (i["client"]["id"], i["prop"]["id"]): i
+        for i in fol["dated"] if i["kind"] == "overdue"
+    }
+    latest = {}
+    for v in data["visits"]:
+        key = (v["client_id"], v["property_id"])
+        cur = latest.get(key)
+        if cur is None or (v["visited_at"] or datetime.min) > (
+                cur["visited_at"] or datetime.min):
+            latest[key] = v
+    users = {u["tg"]: u["name"] for u in data["users"]}
+    out = []
+    for (cid, pid), v in latest.items():
+        c, p = clients.get(cid), props.get(pid)
+        if not c or not p:
+            continue
+        if c["status"] not in ACTIVE_CLIENT_STATUSES:
+            continue
+        if p["status"] not in ACTIVE_PROPERTY_STATUSES:
+            continue
+        if v["next_action"] == "رد شد" or v["interest"] == "رد":
+            continue
+        score, reasons, gaps = 0, [], []
+        pts = action_pts.get(v["next_action"])
+        if pts:
+            score += pts
+            reasons.append(f"اقدام بعدی: {v['next_action']}")
+        else:
+            gaps.append("اقدام بعدی مشخص نیست")
+        ip = interest_pts.get(v["interest"])
+        if ip:
+            score += ip
+            reasons.append(f"علاقه مشتری: {v['interest']}")
+        elif not v["interest"]:
+            gaps.append("میزان علاقه ثبت نشده")
+        if v["visited_at"]:
+            age = (now_utc - v["visited_at"]).days
+            bonus = 15 if age <= 3 else 10 if age <= 7 else 5 if age <= 14 else 0
+            score += bonus
+            reasons.append(f"آخرین بازدید {age} روز پیش")
+        due = parse_date_text(v["followup_date"])
+        if due:
+            score += 5
+        else:
+            gaps.append("تاریخ پیگیری ثبت نشده")
+        if c["max_budget"] > 0:
+            if p["price"] > 0 and p["price"] <= c["max_budget"]:
+                score += 10
+                reasons.append("قیمت فایل در بودجه")
+            elif p["price"] > c["max_budget"]:
+                reasons.append("قیمت فایل بالاتر از بودجه")
+        else:
+            gaps.append("بودجه مشتری ثبت نشده")
+        if p["status"] == STATUS_NEGOTIATING:
+            score += 5
+            reasons.append("فایل در حال مذاکره است")
+        ov = overdue_keys.get((cid, pid))
+        if ov:
+            action = f"پیگیری فوری ({ov['days_over']} روز عقب‌افتاده)"
+        elif v["next_action"] == "قرارداد":
+            action = "پیگیری برای نهایی‌کردن قرارداد"
+        elif v["next_action"] == "مذاکره":
+            action = "ادامه‌ی مذاکره"
+        elif v["next_action"] == "بازدید مجدد":
+            action = "هماهنگی بازدید مجدد"
+        else:
+            action = "تماس پیگیری"
+        out.append({
+            "client": c, "prop": p, "visit": v, "score": min(score, 100),
+            "reasons": reasons, "gaps": gaps, "action": action,
+            "overdue": bool(ov),
+            "agent": users.get(v["agent_tg"], f"کاربر {v['agent_tg']}"),
+        })
+    out.sort(key=lambda x: (-x["score"], x["prop"]["id"]))
+    return out
+
+
+def dash_summary(data, period, now_utc, fol):
+    props = data["properties"]
+    active = [p for p in props if p["status"] in ACTIVE_PROPERTY_STATUSES]
+    s, e = period["start"], period["end"]
+    ev = [x for x in data["events"] if _in(x["at"], s, e)]
+    sold_us = {x["property_id"] for x in ev if x["new"] == SOLD_BY_US}
+    sold_other = {x["property_id"] for x in ev if x["new"] == SOLD_BY_OTHER}
+    dropped = {x["property_id"] for x in ev if x["new"] == STATUS_DROPPED}
+    latest = {}
+    for v in data["visits"]:
+        cur = latest.get(v["client_id"])
+        if cur is None or (v["visited_at"] or datetime.min) > (
+                cur["visited_at"] or datetime.min):
+            latest[v["client_id"]] = v
+    cl = {c["id"]: c for c in data["clients"]}
+    pr = {p["id"]: p for p in props}
+    neg = 0
+    for cid, v in latest.items():
+        c, p = cl.get(cid), pr.get(v["property_id"])
+        if (c and p and c["status"] in ACTIVE_CLIENT_STATUSES
+                and p["status"] in ACTIVE_PROPERTY_STATUSES
+                and v["next_action"] in ("مذاکره", "قرارداد")):
+            neg += 1
+    ad_un = sum(1 for p in active if p["ad"] in (AD_UNADVERTISED, AD_REVIEW))
+    ad_unknown = sum(1 for p in active if p["ad"] == AD_UNKNOWN)
+    return {
+        "active_files": len(active),
+        "new_files": sum(1 for p in props if _in(p["created_at"], s, e)),
+        "negotiating_files": sum(
+            1 for p in props if p["status"] == STATUS_NEGOTIATING),
+        "sold_us": len(sold_us),
+        "sold_other": len(sold_other),
+        "dropped": len(dropped),
+        "active_clients": sum(
+            1 for c in data["clients"]
+            if c["status"] in ACTIVE_CLIENT_STATUSES),
+        "visits": sum(1 for v in data["visits"]
+                      if _in(v["visited_at"], s, e)),
+        "active_negotiations": neg,
+        "contracts": len(sold_us),
+        "overdue": sum(1 for i in fol["dated"] if i["kind"] == "overdue"),
+        "due_today": sum(1 for i in fol["dated"] if i["kind"] == "today"),
+        "unadvertised": ad_un,
+        "ad_unknown": ad_unknown,
+        "incomplete": sum(
+            1 for p in active if prop_incomplete_missing(p)),
+        "critical_missing": sum(
+            1 for p in active if prop_critical_missing(p)),
+    }
+
+
+def dash_advisor_stats(data, period, fol):
+    s, e = period["start"], period["end"]
+    out = []
+    for u in data["users"]:
+        tg = u["tg"]
+        files_reg = sum(
+            1 for p in data["properties"]
+            if p["created_by"] == tg and _in(p["created_at"], s, e))
+        files_active = sum(
+            1 for p in data["properties"]
+            if p["created_by"] == tg
+            and p["status"] in ACTIVE_PROPERTY_STATUSES)
+        clients_active = sum(
+            1 for c in data["clients"]
+            if c["created_by"] == tg
+            and c["status"] in ACTIVE_CLIENT_STATUSES)
+        my_visits = [v for v in data["visits"]
+                     if v["agent_tg"] == tg and _in(v["visited_at"], s, e)]
+        visits_n = len(my_visits)
+        neg_n = (
+            sum(1 for v in my_visits if v["next_action"] == "مذاکره")
+            + sum(1 for a in data["acts"]
+                  if a["tg"] == tg and a["type"] == "مذاکره"
+                  and _in(a["at"], s, e))
+        )
+        calls_n = sum(
+            1 for a in data["acts"]
+            if a["tg"] == tg and a["type"] in CALL_ACTIVITY_TYPES
+            and _in(a["at"], s, e))
+        contracts = len({
+            x["property_id"] for x in data["events"]
+            if x["tg"] == tg and x["new"] == SOLD_BY_US
+            and _in(x["at"], s, e)})
+        overdue = sum(1 for i in fol["dated"]
+                      if i["kind"] == "overdue" and i["agent_tg"] == tg)
+        waiting = sum(1 for i in fol["waiting"] if i["agent_tg"] == tg)
+        if visits_n >= 5:
+            neg_rate = f"{round(100 * neg_n / visits_n)}٪"
+        else:
+            neg_rate = None
+        if neg_n >= 3:
+            con_rate = f"{round(100 * contracts / neg_n)}٪"
+        else:
+            con_rate = None
+        perf = max(
+            0,
+            files_reg * 1 + visits_n * 2 + (calls_n) * 1 + neg_n * 3
+            + contracts * 10 - overdue * 1,
+        )
+        out.append({
+            "tg": tg, "name": u["name"], "files_reg": files_reg,
+            "files_active": files_active, "clients_active": clients_active,
+            "calls": calls_n, "visits": visits_n, "negotiations": neg_n,
+            "contracts": contracts, "overdue": overdue, "waiting": waiting,
+            "neg_rate": neg_rate, "con_rate": con_rate, "perf": perf,
+        })
+    out.sort(key=lambda x: (-x["perf"], x["name"]))
+    return out
+
+
+def dash_alerts(data, now_utc, fol):
+    props_with_dated = {
+        i["prop"]["id"] for i in fol["dated"]}
+    neg_no_next = [
+        p for p in data["properties"]
+        if p["status"] == STATUS_NEGOTIATING
+        and p["id"] not in props_with_dated]
+    cutoff = now_utc - timedelta(days=IDLE_DAYS)
+
+    def ref(x):
+        return x["last_act"] or x["created_at"]
+
+    idle_files = [
+        p for p in data["properties"]
+        if p["status"] in ACTIVE_PROPERTY_STATUSES
+        and ref(p) and ref(p) < cutoff]
+    idle_clients = [
+        c for c in data["clients"]
+        if c["status"] in ACTIVE_CLIENT_STATUSES
+        and ref(c) and ref(c) < cutoff]
+    return {"neg_no_next": neg_no_next, "idle_files": idle_files,
+            "idle_clients": idle_clients}
+
+
+def dash_contracts(data, period):
+    pr = {p["id"]: p for p in data["properties"]}
+    users = {u["tg"]: u["name"] for u in data["users"]}
+
+    def collect(start, end):
+        seen, rows = set(), []
+        for x in sorted(data["events"], key=lambda z: z["at"]):
+            if x["new"] != SOLD_BY_US or not _in(x["at"], start, end):
+                continue
+            if x["property_id"] in seen:
+                continue
+            seen.add(x["property_id"])
+            p = pr.get(x["property_id"])
+            rows.append({
+                "prop": p, "value": x["value"], "at": x["at"],
+                "agent": users.get(x["tg"], "نامشخص"),
+                "area": (p or {}).get("area") or "نامشخص",
+                "deal": (p or {}).get("deal_type") or ENV_SALE,
+            })
+        return rows
+
+    cur = collect(period["start"], period["end"])
+    prev = collect(period["prev_start"], period["prev_end"])
+
+    def tally(rows, key):
+        d = {}
+        for r in rows:
+            d[r[key]] = d.get(r[key], 0) + 1
+        return sorted(d.items(), key=lambda kv: (-kv[1], kv[0]))
+
+    def amount(rows):
+        vals = [r["value"] for r in rows if r["value"] > 0]
+        return sum(vals), len(vals)
+
+    return {
+        "rows": sorted(cur, key=lambda r: r["at"], reverse=True),
+        "count": len(cur), "prev_count": len(prev),
+        "by_agent": tally(cur, "agent"), "by_area": tally(cur, "area"),
+        "by_deal": tally(cur, "deal"),
+        "amount": amount(cur), "prev_amount": amount(prev),
+    }
+
+
+# ---- rendering helpers ----
+
+def _guard_text():
+    return "⛔ این بخش فقط برای مدیر سیستم است."
+
+
+async def dash_guard_msg(message: Message):
+    if not await access_required(message):
+        return False
+    if not is_admin(message.from_user.id):
+        await message.answer(_guard_text())
+        return False
+    return True
+
+
+async def dash_guard_cb(callback: CallbackQuery):
+    if not await callback_access_required(callback):
+        return False
+    if not is_admin(callback.from_user.id):
+        await callback.answer(_guard_text(), show_alert=True)
+        return False
+    return True
+
+
+def dash_home_markup():
+    def b(text, data):
+        return InlineKeyboardButton(text=text, callback_data=data)
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [b("📊 خلاصه مدیریت", "dsh:sum"), b("👥 عملکرد مشاوران", "dsh:adv:1")],
+        [b("🎯 فرصت‌های نزدیک به قرارداد", "dsh:opp:1")],
+        [b("⏰ پیگیری‌های عقب‌افتاده", "dsh:fol:1"),
+         b("🏠 وضعیت فایل‌ها", "dsh:fil")],
+        [b("📢 آگهی‌گذاری", "dsh:ads"), b("🤝 گزارش قراردادها", "dsh:con:1")],
+        [b("📅 انتخاب بازه زمانی", "dsh:per")],
+    ])
+
+
+def _back_row():
+    return [InlineKeyboardButton(
+        text="⬅️ داشبورد", callback_data="dsh:home")]
+
+
+def _name(data, tg):
+    for u in data["users"]:
+        if u["tg"] == tg:
+            return u["name"]
+    return f"کاربر {tg}"
+
+
+def render_summary(sm, period):
+    lines = [
+        f"📊 خلاصه مدیریت — {period['label']}", "",
+        "📁 فایل‌ها",
+        f"• فایل‌های فعال: {sm['active_files']}",
+        f"• فایل‌های جدید در بازه: {sm['new_files']}",
+        f"• فایل‌های در حال مذاکره (وضعیت فایل): {sm['negotiating_files']}",
+        f"• فروخته‌شده توسط تیم (بازه): {sm['sold_us']}",
+        f"• فروخته‌شده توسط دیگران (بازه): {sm['sold_other']}",
+        f"• منصرف‌شده/از دست‌رفته (بازه): {sm['dropped']}", "",
+        "👥 مشتری و فعالیت",
+        f"• مشتریان فعال: {sm['active_clients']}",
+        f"• بازدیدهای انجام‌شده (بازه): {sm['visits']}",
+        f"• مذاکرات فعال: {sm['active_negotiations']}",
+        f"• قراردادهای نهایی‌شده (بازه): {sm['contracts']}", "",
+        "⏰ پیگیری",
+        f"• عقب‌افتاده: {sm['overdue']}",
+        f"• سررسید امروز: {sm['due_today']}", "",
+        "📢 آگهی و کیفیت فایل",
+        f"• فایل‌های فعال آگهی‌نشده: {sm['unadvertised']}",
+        f"• وضعیت آگهی نامشخص: {sm['ad_unknown']}",
+        f"• فایل‌های ناقص: {sm['incomplete']}",
+        f"• فاقد اطلاعات مهم: {sm['critical_missing']}", "",
+        "ℹ️ شمارش‌ها از سوابق ثبت‌شده‌ی ربات است. معاملات قبل از "
+        "نسخه‌ی جدید از یادداشت‌های فعالیت بازیابی شده‌اند.",
+    ]
+    return "\n".join(lines)
+
+
+# ---- handlers ----
+
+async def dash_home(message: Message, state: FSMContext):
+    if not await dash_guard_msg(message):
+        return
+    await state.clear()
+    period = get_period(message.from_user.id)
+    DASH_PERIOD[message.from_user.id] = period
+    await message.answer(
+        f"📊 داشبورد مدیریتی\n📅 بازه: {period['label']}",
+        reply_markup=dash_home_markup(),
+    )
+
+
+async def _dash_context(tg_id):
+    period = get_period(tg_id)
+    now = datetime.utcnow()
+    data = await dash_load(period)
+    fol = dash_followups(data, now)
+    return period, now, data, fol
+
+
+@dp.callback_query(F.data.startswith("dsh:"))
+async def dash_callbacks(callback: CallbackQuery, state: FSMContext):
+    if not await dash_guard_cb(callback):
+        return
+    parts = callback.data.split(":")
+    sec = parts[1] if len(parts) > 1 else ""
+    tg = callback.from_user.id
+    msg = callback.message
+
+    try:
+        if sec == "home":
+            period = get_period(tg)
+            await show(
+                msg, f"📊 داشبورد مدیریتی\n📅 بازه: {period['label']}",
+                dash_home_markup(), edit=True)
+
+        elif sec == "per":
+            if len(parts) == 2:
+                rows = [
+                    [InlineKeyboardButton(text="امروز", callback_data="dsh:per:t"),
+                     InlineKeyboardButton(text="۷ روز اخیر", callback_data="dsh:per:w")],
+                    [InlineKeyboardButton(text="۳۰ روز اخیر", callback_data="dsh:per:m"),
+                     InlineKeyboardButton(text="بازه دلخواه", callback_data="dsh:per:c")],
+                    _back_row(),
+                ]
+                await show(
+                    msg, f"📅 بازه‌ی فعلی: {get_period(tg)['label']}\nیکی را انتخاب کن:",
+                    InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+            elif parts[2] == "c":
+                await state.clear()
+                await state.set_state(DashForm.custom)
+                await msg.answer(
+                    "📅 بازه را بفرست؛ مثال:\n"
+                    "۱۴۰۵/۰۷/۰۱ تا ۱۴۰۵/۰۷/۱۵\n"
+                    "(شمسی یا میلادی)",
+                    reply_markup=keyboard([], include_cancel=True))
+            else:
+                DASH_PERIOD[tg] = make_period(parts[2])
+                period, now, data, fol = await _dash_context(tg)
+                sm = dash_summary(data, period, now, fol)
+                await show(msg, render_summary(sm, period),
+                           InlineKeyboardMarkup(inline_keyboard=[_back_row()]),
+                           edit=True)
+
+        elif sec == "sum":
+            period, now, data, fol = await _dash_context(tg)
+            sm = dash_summary(data, period, now, fol)
+            await show(msg, render_summary(sm, period),
+                       InlineKeyboardMarkup(inline_keyboard=[_back_row()]),
+                       edit=True)
+
+        elif sec == "adv":
+            period, now, data, fol = await _dash_context(tg)
+            stats = dash_advisor_stats(data, period, fol)
+            if len(parts) >= 4 and parts[2] == "u":
+                st = next((x for x in stats if x["tg"] == int(parts[3])), None)
+                if not st:
+                    await callback.answer("پیدا نشد", show_alert=True)
+                    return
+                calls = st["calls"] if st["calls"] else "—"
+                lines = [
+                    f"👤 {st['name']} — {period['label']}", "",
+                    f"• فایل ثبت‌شده در بازه: {st['files_reg']}",
+                    f"• فایل‌های فعال: {st['files_active']}",
+                    f"• مشتریان فعال: {st['clients_active']}",
+                    f"• تماس/پیگیری ثبت‌شده: {calls}",
+                    f"• بازدید: {st['visits']}",
+                    f"• مذاکره: {st['negotiations']}",
+                    f"• قرارداد نهایی‌شده: {st['contracts']}",
+                    f"• پیگیری عقب‌افتاده: {st['overdue']}",
+                    f"• مشتری منتظر اقدام بعدی: {st['waiting']}",
+                    f"• بازدید→مذاکره: {st['neg_rate'] or 'داده کافی نیست'}",
+                    f"• مذاکره→قرارداد: {st['con_rate'] or 'داده کافی نیست'}",
+                    "", f"امتیاز ترکیبی عملکرد: {st['perf']}",
+                ]
+                rows = [[InlineKeyboardButton(
+                    text="⬅️ فهرست مشاوران", callback_data="dsh:adv:1")],
+                    _back_row()]
+                await show(msg, "\n".join(lines),
+                           InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+            else:
+                page = int(parts[2]) if len(parts) > 2 else 1
+                pages = max(1, (len(stats) + DASH_LIST_PAGE - 1) // DASH_LIST_PAGE)
+                page = max(1, min(page, pages))
+                chunk = stats[(page - 1) * DASH_LIST_PAGE: page * DASH_LIST_PAGE]
+                lines = [f"👥 عملکرد مشاوران — {period['label']}",
+                         "رتبه بر پایه‌ی عملکرد ترکیبی (فایل، تماس، بازدید، "
+                         "مذاکره، قرارداد منهای پیگیری عقب‌افتاده)", ""]
+                rows = []
+                for i, st in enumerate(chunk, start=(page - 1) * DASH_LIST_PAGE + 1):
+                    lines.append(
+                        f"{i}) {st['name']} | امتیاز {st['perf']} | "
+                        f"فایل {st['files_reg']} | بازدید {st['visits']} | "
+                        f"مذاکره {st['negotiations']} | قرارداد {st['contracts']} | "
+                        f"عقب‌افتاده {st['overdue']}")
+                    rows.append([InlineKeyboardButton(
+                        text=f"🔍 {st['name']}",
+                        callback_data=f"dsh:adv:u:{st['tg']}")])
+                if not chunk:
+                    lines.append("مشاوری ثبت نشده.")
+                rows.extend(pagination_keyboard("dsh:adv", page, pages).inline_keyboard)
+                rows.append(_back_row())
+                await show(msg, "\n".join(lines)[:3900],
+                           InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+
+        elif sec == "opp":
+            period, now, data, fol = await _dash_context(tg)
+            opps = dash_opportunities(data, now, fol)
+            page = int(parts[2]) if len(parts) > 2 else 1
+            pages = max(1, (len(opps) + DASH_PAGE - 1) // DASH_PAGE)
+            page = max(1, min(page, pages))
+            chunk = opps[(page - 1) * DASH_PAGE: page * DASH_PAGE]
+            lines = ["🎯 فرصت‌های نزدیک به قرارداد",
+                     "امتیاز فقط راهنمای اولویت است، نه احتمال قطعی.", ""]
+            rows = []
+            if not chunk:
+                lines.append("فرصتی با داده‌ی کافی پیدا نشد.")
+            for i, o in enumerate(chunk, start=(page - 1) * DASH_PAGE + 1):
+                flag = "⏰ نیازمند اقدام | " if o["overdue"] else ""
+                lines.append(
+                    f"{i}) {flag}امتیاز {o['score']}\n"
+                    f"   👤 {o['client']['name']} | 🏠 {o['prop']['code']} | "
+                    f"مشاور: {o['agent']}\n"
+                    f"   چرا: {('، '.join(o['reasons'])) or '—'}\n"
+                    + (f"   کمبود داده: {('، '.join(o['gaps']))}\n" if o["gaps"] else "")
+                    + f"   ➡️ {o['action']}\n")
+                rows.append([
+                    InlineKeyboardButton(
+                        text=f"👤 {o['client']['name']}",
+                        callback_data=f"copen:{o['client']['id']}"),
+                    InlineKeyboardButton(
+                        text=f"🏠 {o['prop']['code']}",
+                        callback_data=f"popen:{o['prop']['id']}")])
+            rows.extend(pagination_keyboard("dsh:opp", page, pages).inline_keyboard)
+            rows.append(_back_row())
+            await show(msg, "\n".join(lines)[:3900],
+                       InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+
+        elif sec == "fol":
+            period, now, data, fol = await _dash_context(tg)
+            al = dash_alerts(data, now, fol)
+            overdue = sorted(
+                [i for i in fol["dated"] if i["kind"] == "overdue"],
+                key=lambda i: -i["days_over"])
+            today_items = [i for i in fol["dated"] if i["kind"] == "today"]
+            page = int(parts[2]) if len(parts) > 2 else 1
+            pages = max(1, (len(overdue) + DASH_LIST_PAGE - 1) // DASH_LIST_PAGE)
+            page = max(1, min(page, pages))
+            chunk = overdue[(page - 1) * DASH_LIST_PAGE: page * DASH_LIST_PAGE]
+            by_agent = {}
+            for i in overdue:
+                by_agent[i["agent_tg"]] = by_agent.get(i["agent_tg"], 0) + 1
+            lines = ["⏰ پیگیری‌ها و هشدارها", "",
+                     f"عقب‌افتاده: {len(overdue)} | سررسید امروز: {len(today_items)}"]
+            if by_agent:
+                lines.append("مشاوران دارای پیگیری عقب‌افتاده: " + "، ".join(
+                    f"{_name(data, t)} ({n})" for t, n in by_agent.items()))
+            if today_items:
+                lines.append("")
+                lines.append("📅 امروز باید پیگیری شوند:")
+                for i in today_items[:8]:
+                    lines.append(
+                        f"• {i['client']['name']} ({i['prop']['code']}) — "
+                        f"{_name(data, i['agent_tg'])}")
+            lines += ["",
+                      f"🤝 مذاکره بدون اقدام بعدی ثبت‌شده: {len(al['neg_no_next'])}"
+                      + ("".join(f"\n• {p['code']}" for p in al['neg_no_next'][:6])),
+                      f"💤 فایل فعال بدون فعالیت ({IDLE_DAYS}+ روز): {len(al['idle_files'])}"
+                      + ("".join(f"\n• {p['code']}" for p in al['idle_files'][:6])),
+                      f"💤 مشتری فعال بدون فعالیت ({IDLE_DAYS}+ روز): {len(al['idle_clients'])}"
+                      + ("".join(f"\n• {c['name']}" for c in al['idle_clients'][:6])),
+                      "", "عقب‌افتاده‌ها:"]
+            rows = []
+            if not chunk:
+                lines.append("موردی نیست ✅")
+            for i in chunk:
+                lines.append(
+                    f"• {i['client']['name']} | {i['prop']['code']} | "
+                    f"{_name(data, i['agent_tg'])} | موعد {fmt_jalali(i['due'])} "
+                    f"({i['days_over']} روز)")
+                rows.append([
+                    InlineKeyboardButton(
+                        text=f"👤 {i['client']['name']}",
+                        callback_data=f"copen:{i['client']['id']}"),
+                    InlineKeyboardButton(
+                        text=f"🏠 {i['prop']['code']}",
+                        callback_data=f"popen:{i['prop']['id']}")])
+            rows.extend(pagination_keyboard("dsh:fol", page, pages).inline_keyboard)
+            rows.append(_back_row())
+            await show(msg, "\n".join(lines)[:3900],
+                       InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+
+        elif sec in ("fil", "fc", "fl"):
+            await _dash_files(callback, parts)
+
+        elif sec == "ads":
+            period, now, data, fol = await _dash_context(tg)
+            act = [p for p in data["properties"]
+                   if p["status"] in ACTIVE_PROPERTY_STATUSES]
+            c = {AD_UNADVERTISED: 0, AD_REVIEW: 0, AD_ADVERTISED: 0, AD_UNKNOWN: 0}
+            for p in act:
+                c[p["ad"]] = c.get(p["ad"], 0) + 1
+            rows = [[InlineKeyboardButton(
+                text="📋 پیشنهادهای آگهی‌گذاری", callback_data="adv:home")],
+                _back_row()]
+            await show(
+                msg,
+                "📢 آگهی‌گذاری (فایل‌های فعال)\n\n"
+                f"⬜ آگهی‌نشده: {c[AD_UNADVERTISED]}\n"
+                f"🔄 نیازمند بررسی مجدد: {c[AD_REVIEW]}\n"
+                f"❔ وضعیت نامشخص: {c[AD_UNKNOWN]}\n"
+                f"✅ آگهی‌شده: {c[AD_ADVERTISED]}\n\n"
+                "نامشخص‌ها آگهی‌نشده حساب نمی‌شوند.",
+                InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+
+        elif sec == "con":
+            period, now, data, fol = await _dash_context(tg)
+            rep = dash_contracts(data, period)
+            page = int(parts[2]) if len(parts) > 2 else 1
+            pages = max(1, (len(rep["rows"]) + DASH_LIST_PAGE - 1) // DASH_LIST_PAGE)
+            page = max(1, min(page, pages))
+            chunk = rep["rows"][(page - 1) * DASH_LIST_PAGE: page * DASH_LIST_PAGE]
+            total, n_val = rep["amount"]
+            ptotal, pn_val = rep["prev_amount"]
+            lines = [f"🤝 گزارش قراردادها — {period['label']}", "",
+                     f"قراردادهای نهایی‌شده: {rep['count']} "
+                     f"(بازه‌ی قبل: {rep['prev_count']})"]
+            if n_val:
+                lines.append(
+                    f"مجموع مبلغ ثبت‌شده: {price_label(total)} "
+                    f"(برای {n_val} از {rep['count']} قرارداد مبلغ ثبت شده)")
+                if pn_val:
+                    lines.append(f"بازه‌ی قبل: {price_label(ptotal)}")
+            elif rep["count"]:
+                lines.append("مبلغ معامله برای این قراردادها ثبت نشده.")
+            lines.append("کمیسیون/درآمد تخمین زده نمی‌شود.")
+            if rep["by_agent"]:
+                lines.append("به تفکیک مشاور: " + "، ".join(
+                    f"{k} ({v})" for k, v in rep["by_agent"]))
+            if rep["by_area"]:
+                lines.append("به تفکیک منطقه: " + "، ".join(
+                    f"{k} ({v})" for k, v in rep["by_area"]))
+            if rep["by_deal"]:
+                lines.append("به تفکیک نوع معامله: " + "، ".join(
+                    f"{k} ({v})" for k, v in rep["by_deal"]))
+            lines += ["", "جزئیات:"]
+            rows = []
+            if not chunk:
+                lines.append("قراردادی در این بازه ثبت نشده.")
+            for r in chunk:
+                p = r["prop"]
+                code = p["code"] if p else "—"
+                val = price_label(r["value"]) if r["value"] > 0 else "مبلغ ثبت نشده"
+                lines.append(
+                    f"• {code} | {r['area']} | {r['agent']} | {val} | "
+                    f"{fmt_jalali(tehran_today(r['at']))}")
+                if p:
+                    rows.append([InlineKeyboardButton(
+                        text=f"🏠 {code}", callback_data=f"popen:{p['id']}")])
+            rows.extend(pagination_keyboard("dsh:con", page, pages).inline_keyboard)
+            rows.append(_back_row())
+            await show(msg, "\n".join(lines)[:3900],
+                       InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+
+    except Exception as exc:
+        print("DASHBOARD ERROR:", repr(exc)[:300])
+        await msg.answer("⚠️ خطا در ساخت گزارش؛ دوباره تلاش کن.")
+    try:
+        await callback.answer()
+    except Exception:
+        pass
+
+
+# ---- files status + filters ----
+
+FIL_KINDS = [("all", "همه"), ("incomplete", "ناقص"),
+             ("critical", "فاقد اطلاعات مهم"), ("unad", "آگهی‌نشده")]
+FIL_AD = [None, AD_UNADVERTISED, AD_REVIEW, AD_ADVERTISED, AD_UNKNOWN]
+
+
+def _fil_get(tg):
+    return DASH_FILTER.setdefault(tg, {
+        "kind": "all", "status": None, "area": None, "advisor": None,
+        "ad": None})
+
+
+def _cycle(options, current):
+    try:
+        i = options.index(current)
+    except ValueError:
+        i = -1
+    return options[(i + 1) % len(options)]
+
+
+def filter_files(data, flt):
+    out = []
+    for p in data["properties"]:
+        if flt["status"] and p["status"] != flt["status"]:
+            continue
+        if flt["area"] and p["area"] != flt["area"]:
+            continue
+        if flt["advisor"] and p["resp_tg"] != flt["advisor"]:
+            continue
+        if flt["ad"] and p["ad"] != flt["ad"]:
+            continue
+        k = flt["kind"]
+        if k == "incomplete" and not prop_incomplete_missing(p):
+            continue
+        if k == "critical" and not prop_critical_missing(p):
+            continue
+        if k == "unad" and p["ad"] not in (AD_UNADVERTISED, AD_REVIEW):
+            continue
+        out.append(p)
+    return out
+
+
+async def _dash_files(callback, parts):
+    tg = callback.from_user.id
+    msg = callback.message
+    flt = _fil_get(tg)
+    period, now, data, fol = await _dash_context(tg)
+    sec = parts[1]
+    advisors = [None] + sorted({p["resp_tg"] for p in data["properties"]
+                                if p["resp_tg"]})
+    if sec == "fc":
+        field = parts[2]
+        if field == "kind":
+            flt["kind"] = _cycle([k for k, _ in FIL_KINDS], flt["kind"])
+        elif field == "status":
+            flt["status"] = _cycle([None] + STATUSES, flt["status"])
+        elif field == "area":
+            flt["area"] = _cycle([None] + AREAS, flt["area"])
+        elif field == "advisor":
+            flt["advisor"] = _cycle(advisors, flt["advisor"])
+        elif field == "ad":
+            flt["ad"] = _cycle(FIL_AD, flt["ad"])
+        elif field == "reset":
+            flt.update({"kind": "all", "status": None, "area": None,
+                        "advisor": None, "ad": None})
+
+    if sec == "fl":
+        page = int(parts[2]) if len(parts) > 2 else 1
+        files = filter_files(data, flt)
+        pages = max(1, (len(files) + DASH_LIST_PAGE - 1) // DASH_LIST_PAGE)
+        page = max(1, min(page, pages))
+        chunk = files[(page - 1) * DASH_LIST_PAGE: page * DASH_LIST_PAGE]
+        lines = [f"🏠 فهرست فایل‌ها — {len(files)} مورد", ""]
+        rows = []
+        if not chunk:
+            lines.append("فایلی با این فیلتر نیست.")
+        for p in chunk:
+            miss = prop_incomplete_missing(p)
+            price = price_short(p["price"]) if p["price"] > 0 else "—"
+            lines.append(
+                f"• {p['code']} | {p['area'] or '—'} | {p['sqm']:g}م | "
+                f"{price} | {p['status']} | "
+                f"{AD_STATUS_LABELS.get(p['ad'], '—')}"
+                + (f"\n   ناقص: {'، '.join(miss)}" if miss else ""))
+            rows.append([InlineKeyboardButton(
+                text=f"🏠 {p['code']}", callback_data=f"popen:{p['id']}")])
+        lines.append(f"\n(قیمت‌ها {PRICE_UNIT_LABEL})")
+        rows.extend(pagination_keyboard("dsh:fl", page, pages).inline_keyboard)
+        rows.append([InlineKeyboardButton(
+            text="⬅️ فیلترها", callback_data="dsh:fil")])
+        await show(msg, "\n".join(lines)[:3900],
+                   InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+        return
+
+    by_status = {}
+    for p in data["properties"]:
+        by_status[p["status"]] = by_status.get(p["status"], 0) + 1
+    lines = ["🏠 وضعیت فایل‌ها", ""]
+    for st in STATUSES:
+        lines.append(f"{st}: {by_status.get(st, 0)}")
+    files = filter_files(data, flt)
+    kind_label = dict(FIL_KINDS)[flt["kind"]]
+    lines += ["", f"فیلتر فعلی → {len(files)} فایل",
+              f"نوع: {kind_label}",
+              f"وضعیت: {flt['status'] or 'همه'}",
+              f"منطقه: {flt['area'] or 'همه'}",
+              f"مشاور: {_name(data, flt['advisor']) if flt['advisor'] else 'همه'}",
+              f"آگهی: {AD_STATUS_LABELS.get(flt['ad']) if flt['ad'] else 'همه'}"]
+    rows = [
+        [InlineKeyboardButton(text=f"نوع: {kind_label}", callback_data="dsh:fc:kind"),
+         InlineKeyboardButton(text="وضعیت", callback_data="dsh:fc:status")],
+        [InlineKeyboardButton(text="منطقه", callback_data="dsh:fc:area"),
+         InlineKeyboardButton(text="مشاور", callback_data="dsh:fc:advisor")],
+        [InlineKeyboardButton(text="وضعیت آگهی", callback_data="dsh:fc:ad"),
+         InlineKeyboardButton(text="♻️ پاک کردن فیلتر", callback_data="dsh:fc:reset")],
+        [InlineKeyboardButton(text="📋 نمایش فهرست", callback_data="dsh:fl:1")],
+        _back_row(),
+    ]
+    await show(msg, "\n".join(lines)[:3900],
+               InlineKeyboardMarkup(inline_keyboard=rows), edit=True)
+
+
+@dp.message(DashForm.custom, F.text)
+async def dash_custom_period(message: Message, state: FSMContext):
+    if not await dash_guard_msg(message):
+        await state.clear()
+        return
+    dates = parse_all_dates(message.text)
+    if len(dates) != 2:
+        await message.answer(
+            "دو تاریخ معتبر بفرست؛ مثال: ۱۴۰۵/۰۷/۰۱ تا ۱۴۰۵/۰۷/۱۵")
+        return
+    if (max(dates) - min(dates)).days > 730:
+        await message.answer("بازه خیلی طولانی است (حداکثر ۲ سال).")
+        return
+    DASH_PERIOD[message.from_user.id] = make_period(
+        "c", custom=(dates[0], dates[1]))
+    await state.clear()
+    period, now, data, fol = await _dash_context(message.from_user.id)
+    sm = dash_summary(data, period, now, fol)
+    await message.answer(
+        render_summary(sm, period), reply_markup=main_menu(message.from_user.id))
+    await message.answer(
+        "داشبورد 👇", reply_markup=dash_home_markup())
+
+
+# ---------------------------------------------------------
+# ⏰ DAILY 10:00 REMINDER (Asia/Tehran, at-most-once per day)
+# ---------------------------------------------------------
+
+REMINDER_HOUR = 10
+REMINDER_LAST_HOUR = 21
+REMINDER_DONE_DAY = {"day": None}
+
+
+def reminder_build(fol, tg):
+    """Pure: text for one advisor, or None when there is nothing to say."""
+    mine = [i for i in fol["dated"]
+            if i["agent_tg"] == tg and i["kind"] in ("overdue", "today")]
+    if not mine:
+        return None, 0
+    overdue = [i for i in mine if i["kind"] == "overdue"]
+    today_items = [i for i in mine if i["kind"] == "today"]
+    lines = ["⏰ یادآوری پیگیری‌های امروز", ""]
+    if today_items:
+        lines.append("📅 سررسید امروز:")
+        for i in today_items[:10]:
+            lines.append(f"• {i['client']['name']} — فایل {i['prop']['code']}")
+    if overdue:
+        lines.append("")
+        lines.append("⚠️ عقب‌افتاده:")
+        for i in sorted(overdue, key=lambda x: -x["days_over"])[:10]:
+            lines.append(
+                f"• {i['client']['name']} — فایل {i['prop']['code']} "
+                f"({i['days_over']} روز)")
+    return "\n".join(lines), len(mine)
+
+
+async def reminder_tick(now_utc=None):
+    now_utc = now_utc or datetime.utcnow()
+    local = now_utc + TEHRAN_OFFSET
+    if not (REMINDER_HOUR <= local.hour < REMINDER_LAST_HOUR):
+        return
+    day = local.strftime("%Y-%m-%d")
+    if REMINDER_DONE_DAY["day"] == day:
+        return
+    period = make_period("m", today=local.date())
+    data = await dash_load(period)
+    fol = dash_followups(data, now_utc)
+    tgs = {i["agent_tg"] for i in fol["dated"]}
+    for tg in tgs:
+        if not tg or not is_allowed(tg):
+            continue
+        text, n = reminder_build(fol, tg)
+        if not text:
+            continue
+        try:
+            async with SessionLocal() as session:
+                session.add(ReminderLog(tg_id=tg, day=day, items=n))
+                await session.commit()
+        except IntegrityError:
+            continue  # already reminded today (e.g. before a restart)
+        except Exception as exc:
+            print("REMINDER LOG ERROR:", repr(exc)[:200])
+            continue
+        try:
+            await bot.send_message(tg, text)
+        except Exception as exc:
+            print("REMINDER SEND ERROR:", type(exc).__name__)
+    REMINDER_DONE_DAY["day"] = day
+
+
+async def reminder_loop():
+    await asyncio.sleep(20)
+    while True:
+        try:
+            await reminder_tick()
+        except Exception as exc:
+            print("REMINDER LOOP ERROR:", repr(exc)[:200])
+        await asyncio.sleep(60)
+
+
+# ---------------------------------------------------------
+# 🤖 «شهردار ایران‌زمین» assistant chat (grounded, no actions)
+# ---------------------------------------------------------
+
+class AssistantForm(StatesGroup):
+    chat = State()
+
+
+async def mayor_context(tg_id):
+    """Short factual summary of THIS advisor's real data."""
+    try:
+        period = make_period("m")
+        data = await dash_load(period)
+        fol = dash_followups(data, datetime.utcnow())
+        mine_files = [p for p in data["properties"]
+                      if p["created_by"] == tg_id
+                      and p["status"] in ACTIVE_PROPERTY_STATUSES]
+        mine_clients = [c for c in data["clients"]
+                        if c["created_by"] == tg_id
+                        and c["status"] in ACTIVE_CLIENT_STATUSES]
+        overdue = [i for i in fol["dated"]
+                   if i["agent_tg"] == tg_id and i["kind"] == "overdue"]
+        today_items = [i for i in fol["dated"]
+                       if i["agent_tg"] == tg_id and i["kind"] == "today"]
+        return (
+            f"فایل‌های فعال این مشاور: {len(mine_files)}\n"
+            f"مشتریان فعال این مشاور: {len(mine_clients)}\n"
+            f"پیگیری عقب‌افتاده: {len(overdue)}\n"
+            f"پیگیری سررسید امروز: {len(today_items)}"
+        )
+    except Exception as exc:
+        print("MAYOR CONTEXT ERROR:", repr(exc)[:200])
+        return "داده‌ای در دسترس نیست."
+
+
+async def mayor_start(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    await state.clear()
+    if not ai_available():
+        await message.answer(
+            f"🤖 {MAYOR_NAME}\n\n{MAYOR_INTRO}\n\n{AI_UNAVAILABLE_TEXT}"
+        )
+        return
+    ctx = await mayor_context(message.from_user.id)
+    await state.set_state(AssistantForm.chat)
+    await state.update_data(ctx=ctx, history=[])
+    await message.answer(
+        f"🤖 {MAYOR_NAME}\n\n{MAYOR_INTRO}\n\n"
+        "سؤالت را بنویس. (برای خروج: «⬅️ بازگشت»)",
+        reply_markup=keyboard([["⬅️ بازگشت"]], include_cancel=False),
+    )
+
+
+@dp.message(AssistantForm.chat, F.text)
+async def mayor_chat(message: Message, state: FSMContext):
+    if not await access_required(message):
+        return
+    data = await state.get_data()
+    history = list(data.get("history") or [])[-6:]
+    ctx = data.get("ctx") or ""
+    convo = "\n".join(f"{r}: {t}" for r, t in history)
+    prompt = (
+        "داده‌ی واقعی این مشاور (تنها منبع مجاز اعداد):\n"
+        f"{ctx}\n\n"
+        + (f"گفتگوی قبلی:\n{convo}\n\n" if convo else "")
+        + f"پیام مشاور: {message.text.strip()[:1500]}"
+    )
+    try:
+        reply = await gemini_generate(
+            [{"text": prompt}], system=MAYOR_SYSTEM, temperature=0.4,
+            timeout=45)
+    except AIError as exc:
+        await message.answer(exc.user_message)
+        return
+    reply = reply[:3500]
+    history += [("مشاور", message.text.strip()[:500]),
+                (MAYOR_NAME, reply[:500])]
+    await state.update_data(history=history[-8:])
+    await message.answer(reply)
+
+
+# =========================================================
 # NOOP CALLBACK
 # =========================================================
 
@@ -9644,6 +12534,8 @@ async def errors_handler(event):
 async def main():
 
     await migrate()
+    await backfill_status_events()
+    asyncio.create_task(reminder_loop())
 
     print(
         "🏙️ Hooman Real Estate CRM started."
