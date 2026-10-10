@@ -1460,6 +1460,8 @@ def env_main_menu(user_id: int):
         ["🎯 پیشنهاد به مشتری", "⚡ ثبت سریع"],
         ["📊 عملکرد من", "🤖 شهردار ایران‌زمین"],
     ]
+    if is_admin(user_id):
+        rows.append(["📊 داشبورد مدیریتی"])
     return keyboard(rows, include_cancel=False)
 
 
@@ -12522,24 +12524,126 @@ async def mayor_start(message: Message, state: FSMContext):
     await state.update_data(ctx=ctx, history=[])
     await message.answer(
         f"🤖 {MAYOR_NAME}\n\n{MAYOR_INTRO}\n\n"
-        "سؤالت را بنویس. (برای خروج: «⬅️ بازگشت»)",
+        "سؤالت را بنویس؛ برای تحلیل فروش، «فایل» را بفرست یا کد دقیق فایل را وارد کن. (برای خروج: «⬅️ بازگشت»)",
         reply_markup=keyboard([["⬅️ بازگشت"]], include_cancel=False),
     )
 
 
 @dp.message(AssistantForm.chat, F.text)
+async def _mayor_visible_properties(tg_id, limit=15):
+    """Return active sale files visible to this advisor, without exposing private files."""
+    async with SessionLocal() as session:
+        user = (await session.execute(
+            select(User).where(User.telegram_id == tg_id)
+        )).scalar_one_or_none()
+        if not user:
+            return []
+        stmt = select(Property).where(
+            Property.status.in_(ACTIVE_PROPERTY_STATUSES),
+            _sale_only(Property),
+        )
+        vis = vis_filter(Property, user, tg_id)
+        if vis is not None:
+            stmt = stmt.where(vis)
+        stmt = stmt.order_by(Property.updated_at.desc()).limit(limit)
+        return list((await session.execute(stmt)).scalars().all())
+
+
+def _mayor_property_facts(prop):
+    """Facts supplied to AI from the selected real database record."""
+    return (
+        f"کد فایل: {prop.code}\n"
+        f"وضعیت: {prop.status}\n"
+        f"نوع معامله: {prop.deal_type}\n"
+        f"منطقه: {prop.area or 'ثبت نشده'}\n"
+        f"نوع ملک: {prop.property_type or 'ثبت نشده'}\n"
+        f"متراژ: {prop.sqm or 'ثبت نشده'} متر\n"
+        f"قیمت ثبت‌شده: {prop_price_text(prop)}\n"
+        f"تعداد اتاق: {prop.bedrooms or 'ثبت نشده'}\n"
+        f"سن بنا: {getattr(prop, 'building_age', None) or 'ثبت نشده'}\n"
+        f"طبقه: {prop.floor_label or prop.unit_floor or 'ثبت نشده'}\n"
+        f"آسانسور: {prop.elevator or 'ثبت نشده'}\n"
+        f"پارکینگ: {prop.parking or 'ثبت نشده'}\n"
+        f"انباری: {prop.storage or 'ثبت نشده'}\n"
+        f"نوع سند: {prop.document_type or 'ثبت نشده'}\n"
+        f"توضیحات فایل: {prop.description or 'ثبت نشده'}\n"
+        "توجه: مواردی که «ثبت نشده» هستند، نباید حدس زده شوند."
+    )
+
+
 async def mayor_chat(message: Message, state: FSMContext):
     if not await access_required(message):
         return
     data = await state.get_data()
     history = list(data.get("history") or [])[-6:]
     ctx = data.get("ctx") or ""
+    user_text = (message.text or "").strip()
+    normalized = user_text.replace("\u200c", " ").strip().lower()
+
+    # Within the existing «شهردار ایران‌زمین» chat, typing «فایل» shows
+    # active files that the advisor is allowed to see.
+    if normalized in {"فایل", "فایل ها", "فایلها", "تحلیل فایل",
+                      "چطور بفروشم", "چطور این فایل را بفروشم",
+                      "فایل برای فروش"}:
+        props = await _mayor_visible_properties(message.from_user.id)
+        if not props:
+            await message.answer(
+                "فعلاً فایل فعالِ قابل‌نمایشی برای تحلیل پیدا نکردم. "
+                "کد فایل را هم می‌توانی مستقیم بفرستی."
+            )
+            return
+        lines = ["🏠 فایل‌های فعال برای تحلیل فروش", "",
+                 "کد فایل موردنظر را در همین گفتگو بفرست تا استراتژی فروشش را آماده کنم:", ""]
+        for prop in props:
+            lines.append(
+                f"• {prop.code} | {prop.area or 'منطقه نامشخص'} | "
+                f"{prop.sqm or '—'} متر | {prop_price_text(prop)}"
+            )
+        lines += ["", "برای دیدن فایل‌های بیشتر، کد هر فایل را مستقیم بفرست."]
+        await message.answer("\n".join(lines)[:3800])
+        return
+
+    # If the message exactly matches a property code, ground the answer in
+    # that property record and ask Gemini for a practical sale plan.
+    props = await _mayor_visible_properties(message.from_user.id, limit=100)
+    selected = next(
+        (p for p in props if user_text.casefold() == str(p.code).casefold()),
+        None
+    )
+    if selected:
+        property_facts = _mayor_property_facts(selected)
+        prompt = (
+            "مشاور این فایل را برای تحلیل فروش انتخاب کرده است. فقط بر اساس اطلاعات "
+            "واقعی زیر تحلیل کن و اگر اطلاعاتی ناقص است، صریح بگو. قیمت بازار یا "
+            "قیمت پیشنهادی را بدون داده مقایسه‌ای قطعی اعلام نکن.\n\n"
+            f"اطلاعات ثبت‌شده فایل:\n{property_facts}\n\n"
+            "خروجی را عملی و فارسی ارائه کن: "
+            "۱) مزیت‌های قابل‌استفاده در فروش، ۲) مشتری هدف احتمالی، "
+            "۳) متن معرفی و تماس اولیه، ۴) اعتراض‌های محتمل و پاسخ پیشنهادی، "
+            "۵) سناریوی بازدید و مذاکره، ۶) برنامه پیگیری تا قرارداد، "
+            "۷) اطلاعاتی که مشاور باید قبل از تبلیغ یا مذاکره تکمیل کند. "
+            "هیچ ویژگی، قیمت مقایسه‌ای یا اطلاعاتی درباره ملک را جعل نکن."
+        )
+        try:
+            reply = await gemini_generate(
+                [{"text": prompt}], system=MAYOR_SYSTEM, temperature=0.35,
+                timeout=60, label="mayor_sale_plan")
+        except AIError as exc:
+            await message.answer(exc.user_message)
+            return
+        await message.answer(
+            f"🎯 استراتژی فروش فایل {selected.code}\n\n{reply[:3500]}"
+        )
+        return
+
     convo = "\n".join(f"{r}: {t}" for r, t in history)
     prompt = (
         "داده‌ی واقعی این مشاور (تنها منبع مجاز اعداد):\n"
         f"{ctx}\n\n"
         + (f"گفتگوی قبلی:\n{convo}\n\n" if convo else "")
-        + f"پیام مشاور: {message.text.strip()[:1500]}"
+        + f"پیام مشاور: {user_text[:1500]}"
+        + "\nاگر مشاور می‌خواهد فایل مشخصی را تحلیل کند، از او بخواه «فایل» را بفرستد "
+          "تا فهرست فایل‌های قابل‌دسترسی را ببیند، یا کد دقیق فایل را وارد کند."
     )
     try:
         reply = await gemini_generate(
@@ -12549,8 +12653,7 @@ async def mayor_chat(message: Message, state: FSMContext):
         await message.answer(exc.user_message)
         return
     reply = reply[:3500]
-    history += [("مشاور", message.text.strip()[:500]),
-                (MAYOR_NAME, reply[:500])]
+    history += [("مشاور", user_text[:500]), (MAYOR_NAME, reply[:500])]
     await state.update_data(history=history[-8:])
     await message.answer(reply)
 
