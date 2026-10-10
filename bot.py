@@ -1,7 +1,8 @@
 import os
 from uuid import uuid4
 import asyncio
-from datetime import datetime
+import random
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart
@@ -39,6 +40,16 @@ from sqlalchemy.orm import (
     Mapped,
     mapped_column,
 )
+
+
+def utcnow_naive():
+    """Current UTC time as a NAIVE datetime.
+
+    Drop-in replacement for the deprecated utcnow() call: the value is
+    identical (naive, UTC), so it stays comparable with the naive DateTime
+    columns already stored in the database and with TEHRAN_OFFSET math.
+    """
+    return datetime.now(timezone.utc).replace(tzinfo=None)
 
 
 # =========================================================
@@ -165,7 +176,7 @@ class User(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
     # ---- Stage 3+ additions ----
@@ -309,12 +320,12 @@ class Property(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
     updated_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
     # ---- Stage 2 additions (safe, all with defaults) ----
@@ -383,7 +394,7 @@ class PropertyPhoto(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
 
@@ -457,7 +468,7 @@ class Client(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
     # ---- Stage 2 additions (safe, all with defaults) ----
@@ -531,7 +542,7 @@ class Visit(Base):
 
     visited_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
     interest: Mapped[str] = mapped_column(
@@ -608,7 +619,7 @@ class Activity(Base):
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime,
-        default=datetime.utcnow
+        default=utcnow_naive
     )
 
 
@@ -1478,7 +1489,7 @@ def tehran_time(dt):
 
 
 def day_start_utc():
-    now_local = datetime.utcnow() + TEHRAN_OFFSET
+    now_local = utcnow_naive() + TEHRAN_OFFSET
     start_local = now_local.replace(
         hour=0, minute=0, second=0, microsecond=0
     )
@@ -2869,7 +2880,7 @@ async def qr_find_similar(fields):
 
 
 async def qr_generate_code(session):
-    prefix = "Q" + datetime.utcnow().strftime("%y%m%d") + "-"
+    prefix = "Q" + utcnow_naive().strftime("%y%m%d") + "-"
     n = await session.scalar(
         select(func.count(Property.id)).where(Property.code.like(prefix + "%"))
     ) or 0
@@ -2925,7 +2936,7 @@ async def qr_create_property(tg_user, draft):
             deal_type=ENV_SALE,
             floor_label=qr_floor_label(floor, total),
             created_by=tg_user.id,
-            updated_at=datetime.utcnow(),
+            updated_at=utcnow_naive(),
             building_age=f.get("building_age"),
             source=draft.get("source") or "manual",
             source_url=draft.get("source_url"),
@@ -3560,7 +3571,7 @@ async def toggle_urgent(callback: CallbackQuery):
             return
         make_urgent = not obj.is_urgent
         obj.is_urgent = 1 if make_urgent else 0
-        obj.urgent_at = datetime.utcnow() if make_urgent else None
+        obj.urgent_at = utcnow_naive() if make_urgent else None
         if not make_urgent:
             obj.follow_up_user_id = None
         await add_activity(
@@ -3942,7 +3953,7 @@ async def photo_make_main(callback: CallbackQuery):
                 PropertyPhoto.property_id == ph.property_id
             )
         )
-        ph.created_at = (earliest or datetime.utcnow()) - timedelta(
+        ph.created_at = (earliest or utcnow_naive()) - timedelta(
             seconds=1
         )
         prop_id = ph.property_id
@@ -5960,7 +5971,7 @@ async def property_confirmation(
             status="🟢 فعال",
             deal_type=current_env(message.from_user.id),
             created_by=message.from_user.id,
-            updated_at=datetime.utcnow()
+            updated_at=utcnow_naive()
         )
 
         session.add(prop)
@@ -6964,7 +6975,7 @@ async def property_edit_value(
             prop.rent = 0
             prop.vacancy_date = ""
 
-            prop.updated_at = datetime.utcnow()
+            prop.updated_at = utcnow_naive()
 
             user = await get_user(
                 session,
@@ -6998,7 +7009,7 @@ async def property_edit_value(
                 value
             )
 
-            prop.updated_at = datetime.utcnow()
+            prop.updated_at = utcnow_naive()
 
             user = await get_user(
                 session,
@@ -7474,7 +7485,7 @@ async def property_status_save(
         old_status = prop.status
 
         prop.status = message.text
-        prop.updated_at = datetime.utcnow()
+        prop.updated_at = utcnow_naive()
 
         user = await get_user(
             session,
@@ -7544,7 +7555,7 @@ async def property_transaction_value(
         )
 
         prop.transaction_value = value
-        prop.updated_at = datetime.utcnow()
+        prop.updated_at = utcnow_naive()
 
         user = await get_user(
             session,
@@ -9846,7 +9857,7 @@ class PropertyVideo(Base):
     file_size: Mapped[int] = mapped_column(BigInteger, default=0)
     created_by: Mapped[int] = mapped_column(BigInteger, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow
+        DateTime, default=utcnow_naive
     )
 
 
@@ -9887,10 +9898,10 @@ class PropertyAd(Base):
     )
     marked_by: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow
+        DateTime, default=utcnow_naive
     )
     updated_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow
+        DateTime, default=utcnow_naive
     )
 
 
@@ -9906,7 +9917,7 @@ class StatusEvent(Base):
     transaction_value: Mapped[float] = mapped_column(Float, default=0)
     source: Mapped[str] = mapped_column(String(20), default="live")
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow, index=True
+        DateTime, default=utcnow_naive, index=True
     )
 
 
@@ -9921,7 +9932,7 @@ class ReminderLog(Base):
     day: Mapped[str] = mapped_column(String(10))
     items: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(
-        DateTime, default=datetime.utcnow
+        DateTime, default=utcnow_naive
     )
 
 
@@ -10043,8 +10054,52 @@ def ai_available():
     return bool(GEMINI_API_KEY)
 
 
+# Transient failures (Gemini 5xx, dropped connection) are retried a limited
+# number of times with growing delays. AI_RETRY_DELAYS are the waits before
+# the 2nd and 3rd attempt (a little random jitter is added on top), so at
+# most 3 attempts are made. Timeouts and 400/401/403 are never retried;
+# 429 is retried once.
+AI_RETRY_DELAYS = (1.5, 4.0)
+AI_RETRYABLE_STATUSES = (500, 502, 503, 504)
+AI_RATE_LIMIT_RETRY_DELAY = 3.0
+
+
+def ai_error_summary(data):
+    """One-line, key-free summary of a Gemini error body for the log."""
+    err = data.get("error") if isinstance(data, dict) else None
+    if not isinstance(err, dict):
+        return ""
+    text = "{}: {}".format(
+        str(err.get("status") or "")[:40],
+        " ".join(str(err.get("message") or "").split())[:200],
+    )
+    if GEMINI_API_KEY:
+        text = text.replace(GEMINI_API_KEY, "***")
+    return text.strip(": ")
+
+
+async def _ai_sleep(delay):
+    await asyncio.sleep(delay + random.uniform(0, 0.5))
+
+
+async def _gemini_post(body, headers, timeout):
+    async with aiohttp.ClientSession(
+        timeout=aiohttp.ClientTimeout(total=timeout)
+    ) as http:
+        async with http.post(
+            GEMINI_URL, json=body, headers=headers
+        ) as resp:
+            status = resp.status
+            try:
+                data = await resp.json(content_type=None)
+            except Exception:
+                data = {}
+    return status, data
+
+
 async def gemini_generate(
-    parts, system=None, json_mode=False, temperature=0.2, timeout=60
+    parts, system=None, json_mode=False, temperature=0.2, timeout=60,
+    label="ai",
 ):
     if not GEMINI_API_KEY:
         raise AIError(AI_UNAVAILABLE_TEXT, "no_key")
@@ -10063,41 +10118,60 @@ async def gemini_generate(
         "Content-Type": "application/json",
     }
 
-    try:
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=timeout)
-        ) as http:
-            async with http.post(
-                GEMINI_URL, json=body, headers=headers
-            ) as resp:
-                status = resp.status
-                try:
-                    data = await resp.json(content_type=None)
-                except Exception:
-                    data = {}
-    except asyncio.TimeoutError:
-        raise AIError(
-            "⏱ پاسخ سرویس هوش مصنوعی دیر شد؛ کمی بعد دوباره تلاش کن.",
-            "timeout",
-        )
-    except Exception as exc:
-        print("AI NETWORK ERROR:", type(exc).__name__)
-        raise AIError(AI_UNAVAILABLE_TEXT, "network")
+    max_attempts = len(AI_RETRY_DELAYS) + 1
+    attempt = 0
+    while True:
+        attempt += 1
+        can_retry = attempt < max_attempts
+        try:
+            status, data = await _gemini_post(body, headers, timeout)
+        except asyncio.TimeoutError:
+            print(f"AI TIMEOUT [{label}] attempt {attempt}/{max_attempts}")
+            raise AIError(
+                "⏱ پاسخ سرویس هوش مصنوعی دیر شد؛ کمی بعد دوباره تلاش کن.",
+                "timeout",
+            )
+        except Exception as exc:
+            print(
+                f"AI NETWORK ERROR [{label}] "
+                f"attempt {attempt}/{max_attempts}:",
+                type(exc).__name__,
+            )
+            if can_retry:
+                await _ai_sleep(AI_RETRY_DELAYS[attempt - 1])
+                continue
+            raise AIError(AI_UNAVAILABLE_TEXT, "network")
 
-    if status == 429:
-        print("AI ERROR: quota/rate limit (429)")
-        raise AIError(
-            "🤖 سهمیه‌ی سرویس هوش مصنوعی فعلاً تمام شده؛ "
-            "کمی بعد دوباره تلاش کن یا از ثبت متنی استفاده کن.",
-            "quota",
-        )
-    if status in (400, 401, 403):
-        err = (data or {}).get("error", {}) if isinstance(data, dict) else {}
-        print("AI ERROR:", status, str(err.get("status", ""))[:60])
-        raise AIError(AI_UNAVAILABLE_TEXT, "auth")
-    if status >= 500 or status != 200:
-        print("AI ERROR: http", status)
-        raise AIError(AI_UNAVAILABLE_TEXT, "server")
+        if status == 429:
+            print(f"AI ERROR: quota/rate limit (429) [{label}] "
+                  f"attempt {attempt}/{max_attempts}")
+            if attempt == 1:
+                await _ai_sleep(AI_RATE_LIMIT_RETRY_DELAY)
+                continue
+            raise AIError(
+                "🤖 سهمیه‌ی سرویس هوش مصنوعی فعلاً تمام شده؛ "
+                "کمی بعد دوباره تلاش کن یا از ثبت متنی استفاده کن.",
+                "quota",
+            )
+        if status in (400, 401, 403):
+            print("AI ERROR:", status, f"[{label}]", ai_error_summary(data))
+            raise AIError(AI_UNAVAILABLE_TEXT, "auth")
+        if status in AI_RETRYABLE_STATUSES and can_retry:
+            print(
+                f"AI RETRY: http {status} [{label}] "
+                f"attempt {attempt}/{max_attempts}",
+                ai_error_summary(data),
+            )
+            await _ai_sleep(AI_RETRY_DELAYS[attempt - 1])
+            continue
+        if status != 200:
+            print(
+                f"AI ERROR: http {status} [{label}] "
+                f"attempt {attempt}/{max_attempts}",
+                ai_error_summary(data),
+            )
+            raise AIError(AI_UNAVAILABLE_TEXT, "server")
+        break
 
     try:
         cands = data.get("candidates") or []
@@ -10171,7 +10245,7 @@ async def ai_voice_extract(audio_bytes, mime="audio/ogg"):
         {"text": VOICE_PROMPT},
     ]
     text = await gemini_generate(
-        parts, json_mode=True, temperature=0.0, timeout=90
+        parts, json_mode=True, temperature=0.0, timeout=90, label="voice"
     )
     obj = parse_json_loose(text)
     if not isinstance(obj, dict):
@@ -10422,7 +10496,7 @@ def ad_readiness(prop, n_photos, n_videos, now=None):
     Uses only real stored fields. It is NOT a sale probability.
     Returns (score, todo_list, ok_list).
     """
-    now = now or datetime.utcnow()
+    now = now or utcnow_naive()
     score = 0
     todo, ok = [], []
 
@@ -10513,7 +10587,7 @@ def ad_missing_list(prop, n_photos):
     if not (prop.tenant or "").strip():
         items.append("وضعیت سکونت (خالی/مستأجر/مالک)")
     ref = prop.updated_at or prop.created_at
-    if ref and (datetime.utcnow() - ref).days > AD_STALE_DAYS:
+    if ref and (utcnow_naive() - ref).days > AD_STALE_DAYS:
         items.append("معتبر بودن فایل و قیمت (مدت زیادی به‌روز نشده)")
     if n_photos == 0:
         items.append("عکس ملک")
@@ -10620,6 +10694,7 @@ async def generate_ad_text(prop):
                 json_mode=True,
                 temperature=0.4,
                 timeout=60,
+                label="ad",
             )
             obj = parse_json_loose(text)
             if isinstance(obj, dict):
@@ -10884,8 +10959,8 @@ async def ad_generate_and_store(session, prop, user, regenerate):
     ad.title, ad.text_short, ad.text_full = title, short, full
     ad.missing_info = missing
     ad.text_source = source
-    ad.generated_at = datetime.utcnow()
-    ad.updated_at = datetime.utcnow()
+    ad.generated_at = utcnow_naive()
+    ad.updated_at = utcnow_naive()
     await session.commit()
     await add_activity(
         session, user.id,
@@ -11006,7 +11081,7 @@ async def ad_callbacks(callback: CallbackQuery, state: FSMContext):
                 session.add(ad)
             ad.status = new_status
             ad.marked_by = user.id
-            ad.updated_at = datetime.utcnow()
+            ad.updated_at = utcnow_naive()
             await session.commit()
             await add_activity(
                 session, user.id, "تغییر وضعیت آگهی",
@@ -11116,9 +11191,9 @@ async def ad_callbacks(callback: CallbackQuery, state: FSMContext):
                 session.add(ad)
             ad.status = AD_ADVERTISED
             ad.platform = platform
-            ad.published_at = datetime.utcnow()
+            ad.published_at = utcnow_naive()
             ad.marked_by = user.id
-            ad.updated_at = datetime.utcnow()
+            ad.updated_at = utcnow_naive()
             await session.commit()
             await add_activity(
                 session, user.id, "تأیید و ثبت آگهی‌شده",
@@ -11207,7 +11282,7 @@ async def ad_edit_save(message: Message, state: FSMContext):
         if not ad.text_short:
             ad.text_short = ad.title
         ad.text_source = "manual"
-        ad.updated_at = datetime.utcnow()
+        ad.updated_at = utcnow_naive()
         await session.commit()
         await add_activity(
             session, user.id, "ویرایش متن آگهی",
@@ -11333,7 +11408,7 @@ def fmt_jalali(d):
 
 
 def tehran_today(now_utc=None):
-    return ((now_utc or datetime.utcnow()) + TEHRAN_OFFSET).date()
+    return ((now_utc or utcnow_naive()) + TEHRAN_OFFSET).date()
 
 
 def tehran_day_start_utc(d):
@@ -11901,7 +11976,7 @@ async def dash_home(message: Message, state: FSMContext):
 
 async def _dash_context(tg_id):
     period = get_period(tg_id)
-    now = datetime.utcnow()
+    now = utcnow_naive()
     data = await dash_load(period)
     fol = dash_followups(data, now)
     return period, now, data, fol
@@ -12360,7 +12435,7 @@ def reminder_build(fol, tg):
 
 
 async def reminder_tick(now_utc=None):
-    now_utc = now_utc or datetime.utcnow()
+    now_utc = now_utc or utcnow_naive()
     local = now_utc + TEHRAN_OFFSET
     if not (REMINDER_HOUR <= local.hour < REMINDER_LAST_HOUR):
         return
@@ -12416,7 +12491,7 @@ async def mayor_context(tg_id):
     try:
         period = make_period("m")
         data = await dash_load(period)
-        fol = dash_followups(data, datetime.utcnow())
+        fol = dash_followups(data, utcnow_naive())
         mine_files = [p for p in data["properties"]
                       if p["created_by"] == tg_id
                       and p["status"] in ACTIVE_PROPERTY_STATUSES]
@@ -12474,7 +12549,7 @@ async def mayor_chat(message: Message, state: FSMContext):
     try:
         reply = await gemini_generate(
             [{"text": prompt}], system=MAYOR_SYSTEM, temperature=0.4,
-            timeout=45)
+            timeout=45, label="mayor")
     except AIError as exc:
         await message.answer(exc.user_message)
         return
