@@ -1460,8 +1460,6 @@ def env_main_menu(user_id: int):
         ["🎯 پیشنهاد به مشتری", "⚡ ثبت سریع"],
         ["📊 عملکرد من", "🤖 شهردار ایران‌زمین"],
     ]
-    if is_admin(user_id):
-        rows.append(["📊 داشبورد مدیریتی"])
     return keyboard(rows, include_cancel=False)
 
 
