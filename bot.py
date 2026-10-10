@@ -859,18 +859,18 @@ def money(value):
         return str(value)
 
 
-PRICE_UNIT_LABEL = "میلیون تومان"
+PRICE_UNIT_LABEL = "میلیارد تومان"
 
 
 def price_short(value):
-    """Display-only short price for SALE amounts.
+    """Display-only short price for SALE amounts, in billion Toman.
 
-    The DB stores sale prices in Toman. The display is in million Toman with
-    the last three digits of the million-count after a slash:
-    29_000_000_000 -> "29/000", 1_250_000_000 -> "1/250".
-    Below one billion Toman the plain million count is shown (850_000_000
-    -> "850"). The stored value is never modified; call this only when
-    rendering text.
+    The DB stores sale prices in Toman. The display is in billion Toman with
+    three decimals, where "/" is the Persian decimal separator:
+    26_000_000_000 -> "26/000", 1_250_000_000 -> "1/250",
+    850_000_000 -> "0/850". Precision is one million Toman (the value is
+    rounded to the nearest million). The stored value is never modified;
+    call this only when rendering text.
     """
     try:
         value = float(value)
@@ -881,9 +881,6 @@ def price_short(value):
         return "0"
 
     millions = int(round(value / 1_000_000))
-
-    if millions < 1000:
-        return str(millions)
 
     return f"{millions // 1000}/{millions % 1000:03d}"
 
